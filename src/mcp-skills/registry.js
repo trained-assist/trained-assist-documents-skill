@@ -12,8 +12,8 @@ const defs = [];
 const allDefs = [];
 // Profile skills (trained-assist-agent #1537): core writes the resolved plan and passes
 // SKILLS_RESOLVED; modules of switched-off catalog sections are listed there as
-// 'sales-skills/<file>' and are not registered. Unset/unreadable → nothing hidden.
-const SERVER_ID = 'sales-skills';
+// 'documents-skills/<file>' and are not registered. Unset/unreadable → nothing hidden.
+const SERVER_ID = 'documents-skills';
 function hiddenModules(file) {
   if (!file) return new Set();
   try {

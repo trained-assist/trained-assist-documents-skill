@@ -1,5 +1,5 @@
 'use strict';
-// Profile path resolver for the sales domain — same env contract as
+// Profile path resolver for the documents domain — same env contract as
 // trained-assist-agent's src/data-paths.js (USERS_DIR / AGENT_TOKENS_DIR /
 // AGENT_DATA_DIR, home-relative defaults), so the skill reads the same files core does.
 const os = require('os');

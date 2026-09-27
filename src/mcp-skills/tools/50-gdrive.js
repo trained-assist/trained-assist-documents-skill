@@ -4,84 +4,22 @@
 //
 // Setup flow:
 //   1. gdrive_setup → creates SA in trained-assist-gdrive-sa project (via VM ADC),
-//      stores JSON key as agent-tokens/{userId}/gdrive
+//      stores JSON key as <AGENT_TOKENS_DIR>/{userId}/gdrive (src/gdrive/google-auth.js)
 //   2. User shares Drive folder with the SA email returned by gdrive_setup
 //   3. gdrive_list_files / gdrive_read_file / etc. work from that point
 //
 // Note: SA is created in a separate GCP project (trained-assist-gdrive-sa) that has
 // no org policies blocking key creation, unlike the main GCP project.
 
-const crypto = require('crypto');
-const fs     = require('fs');
-const os     = require('os');
-const path   = require('path');
+const {
+  GCP_PROJECT, getAdcToken, readServiceAccount, writeServiceAccount, getAccessToken,
+} = require('../../gdrive/google-auth');
+const {
+  extractXlsxHyperlinks, parseXlsxToText,
+} = require('../../gdrive/xlsx');
 
-const GCP_PROJECT = 'trained-assist-gdrive-sa';
-const USER_ID     = process.env.USER_ID || process.env.AGENT_USER_ID || '';
-
-// ── Access token cache (per SA email, 55-min TTL) ─────────────────────────────
-
-const _tokenCache = new Map();
-
-// ── GCP ADC — get VM access token from metadata service ──────────────────────
-
-async function getAdcToken() {
-  const res = await fetch(
-    'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
-    { headers: { 'Metadata-Flavor': 'Google' }, signal: AbortSignal.timeout(5000) }
-  );
-  if (!res.ok) throw new Error(`GCP metadata ${res.status}: ${await res.text()}`);
-  return (await res.json()).access_token;
-}
-
-// ── Service Account JWT auth ──────────────────────────────────────────────────
-
-function parseSaJson(userId) {
-  const uid = userId || USER_ID;
-  const raw = uid
-    ? (() => { try { return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', uid, 'gdrive'), 'utf8').trim(); } catch { return null; } })()
-    : process.env.GDRIVE_SA_JSON;
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
-}
-
-function makeJwt(sa) {
-  const now = Math.floor(Date.now() / 1000);
-  const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({
-    iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/documents',
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: now + 3600,
-  })).toString('base64url');
-  const data = `${header}.${payload}`;
-  const sign = crypto.createSign('RSA-SHA256');
-  sign.update(data);
-  return `${data}.${sign.sign(sa.private_key, 'base64url')}`;
-}
-
-async function exchangeJwt(sa) {
-  const jwt = makeJwt(sa);
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
-    signal: AbortSignal.timeout(10000),
-  });
-  const data = await res.json();
-  if (!data.access_token) throw new Error(`Google OAuth ошибка: ${JSON.stringify(data)}`);
-  return data.access_token;
-}
-
-async function getAccessToken(sa) {
-  const key = sa.client_email;
-  const cached = _tokenCache.get(key);
-  if (cached && Date.now() < cached.expiresAt - 60_000) return cached.token;
-  const token = await exchangeJwt(sa);
-  _tokenCache.set(key, { token, expiresAt: Date.now() + 3_600_000 });
-  return token;
-}
+const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
+const parseSaJson = (userId) => readServiceAccount(userId || USER_ID);
 
 function requireSa() {
   const sa = parseSaJson();
@@ -239,148 +177,6 @@ const EXCEL_MIMES = new Set([
 //   • XLSX export (…/export?format=xlsx) preserves in-cell hyperlinks. The xlsx
 //     is a zip; each worksheet's <hyperlink> maps to a URL via its .rels file.
 
-const zlib = require('zlib');
-
-// Minimal ZIP central-directory reader — enough for xlsx, no external deps.
-function readZipEntries(buf) {
-  let eocd = -1;
-  for (let i = buf.length - 22; i >= 0; i--) {
-    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
-  }
-  if (eocd < 0) throw new Error('not a zip (no EOCD)');
-  const count = buf.readUInt16LE(eocd + 10);
-  let off = buf.readUInt32LE(eocd + 16);
-  const entries = {};
-  for (let n = 0; n < count && buf.readUInt32LE(off) === 0x02014b50; n++) {
-    const method   = buf.readUInt16LE(off + 10);
-    const compSize = buf.readUInt32LE(off + 20);
-    const nameLen  = buf.readUInt16LE(off + 28);
-    const extraLen = buf.readUInt16LE(off + 30);
-    const commLen  = buf.readUInt16LE(off + 32);
-    const lho      = buf.readUInt32LE(off + 42);
-    const name     = buf.toString('utf8', off + 46, off + 46 + nameLen);
-    const dataStart = lho + 30 + buf.readUInt16LE(lho + 26) + buf.readUInt16LE(lho + 28);
-    const raw = buf.subarray(dataStart, dataStart + compSize);
-    entries[name] = () => (method === 0 ? raw : zlib.inflateRawSync(raw));
-    off += 46 + nameLen + extraLen + commLen;
-  }
-  return entries;
-}
-
-// Extract in-cell hyperlinks from an xlsx buffer → [{ sheet, cell, url }].
-function extractXlsxHyperlinks(buf) {
-  const entries = readZipEntries(buf);
-  const out = [];
-  for (const p of Object.keys(entries)) {
-    const m = p.match(/^xl\/worksheets\/(sheet\d+)\.xml$/);
-    if (!m) continue;
-    const sheet = m[1];
-    const xml = entries[p]().toString('utf8');
-    const rels = {};
-    const relsFile = entries[`xl/worksheets/_rels/${sheet}.xml.rels`];
-    if (relsFile) {
-      for (const r of relsFile().toString('utf8').matchAll(/Id="([^"]+)"[^>]*Target="([^"]+)"/g)) {
-        rels[r[1]] = r[2];
-      }
-    }
-    // Attribute order varies (r:id may precede ref) — parse each tag order-agnostically.
-    for (const h of xml.matchAll(/<hyperlink\b[^>]*\/?>/g)) {
-      const tag = h[0];
-      const rid = (tag.match(/r:id="([^"]+)"/) || [])[1];
-      const ref = (tag.match(/\bref="([^"]+)"/) || [])[1] || null;
-      if (rid && rels[rid]) out.push({ sheet, cell: ref, url: rels[rid] });
-    }
-  }
-  return out;
-}
-
-// Decode XML entities in cell text.
-function decodeXmlEntities(s) {
-  return s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'");
-}
-
-// Convert column letters (A, B, AA, …) to 1-based number.
-function colLetterToNum(letters) {
-  let n = 0;
-  for (let i = 0; i < letters.length; i++) n = n * 26 + letters.charCodeAt(i) - 64;
-  return n;
-}
-
-// Parse an xlsx Buffer → multi-sheet CSV text (no external deps, uses readZipEntries).
-function parseXlsxToText(buf) {
-  let entries;
-  try { entries = readZipEntries(buf); } catch (e) { return `Ошибка чтения xlsx: ${e.message}`; }
-
-  // Shared strings table
-  const ss = [];
-  if (entries['xl/sharedStrings.xml']) {
-    const xml = entries['xl/sharedStrings.xml']().toString('utf8');
-    for (const m of xml.matchAll(/<si>([\s\S]*?)<\/si>/g)) {
-      const parts = [...m[1].matchAll(/<t(?:\s[^>]*)?>([^<]*)<\/t>/g)].map(t => decodeXmlEntities(t[1]));
-      ss.push(parts.join(''));
-    }
-  }
-
-  // Sheet names (workbook.xml + rels)
-  const sheetNames = {}, rIdToNum = {};
-  if (entries['xl/workbook.xml']) {
-    const xml = entries['xl/workbook.xml']().toString('utf8');
-    for (const m of xml.matchAll(/<sheet\b[^>]+\bname="([^"]+)"[^>]+\br:id="([^"]+)"/g)) sheetNames[m[2]] = m[1];
-  }
-  if (entries['xl/_rels/workbook.xml.rels']) {
-    const xml = entries['xl/_rels/workbook.xml.rels']().toString('utf8');
-    for (const m of xml.matchAll(/Id="([^"]+)"[^>]*Target="worksheets\/(sheet\d+)\.xml"/g)) rIdToNum[m[1]] = m[2];
-  }
-
-  const sections = [];
-  for (let idx = 1; entries[`xl/worksheets/sheet${idx}.xml`]; idx++) {
-    const xml = entries[`xl/worksheets/sheet${idx}.xml`]().toString('utf8');
-    const rId = Object.keys(rIdToNum).find(k => rIdToNum[k] === `sheet${idx}`);
-    const name = (rId && sheetNames[rId]) || `Sheet${idx}`;
-
-    const rowsMap = new Map();
-    let maxCol = 0;
-
-    for (const rm of xml.matchAll(/<row\b[^>]*\br="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
-      const rowNum = parseInt(rm[1]);
-      const cells = new Map();
-      for (const cm of rm[2].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
-        const attrs = cm[1], inner = cm[2];
-        const ref = (attrs.match(/\br="([A-Z]+\d+)"/) || [])[1];
-        if (!ref) continue;
-        const col = colLetterToNum(ref.replace(/\d+/g, ''));
-        maxCol = Math.max(maxCol, col);
-        const type = (attrs.match(/\bt="([^"]+)"/) || [])[1] || 'n';
-        const vMatch = inner.match(/<v>([^<]*)<\/v>/);
-        let value = '';
-        if (type === 's' && vMatch) value = ss[parseInt(vMatch[1])] ?? '';
-        else if (type === 'inlineStr') { const t = inner.match(/<t[^>]*>([^<]*)<\/t>/); value = t ? decodeXmlEntities(t[1]) : ''; }
-        else if (type === 'b' && vMatch) value = vMatch[1] === '1' ? 'TRUE' : 'FALSE';
-        else if (type === 'e') value = vMatch ? vMatch[1] : '#ERR';
-        else if (vMatch) value = type === 'str' ? decodeXmlEntities(vMatch[1]) : vMatch[1];
-        cells.set(col, value);
-      }
-      if (cells.size > 0) rowsMap.set(rowNum, cells);
-    }
-
-    if (rowsMap.size > 0) {
-      const maxRow = Math.max(...rowsMap.keys());
-      const lines = [];
-      for (let r = 1; r <= maxRow; r++) {
-        const c = rowsMap.get(r) || new Map();
-        const row = [];
-        for (let ci = 1; ci <= maxCol; ci++) {
-          const v = c.get(ci) || '';
-          row.push(v.includes(',') || v.includes('"') || v.includes('\n') ? `"${v.replace(/"/g, '""')}"` : v);
-        }
-        lines.push(row.join(','));
-      }
-      sections.push(`=== ${name} ===\n${lines.join('\n')}`);
-    }
-  }
-  return sections.length ? sections.join('\n\n') : '(пустой файл)';
-}
-
 // Pull a Google file ID out of any Drive/Docs/Sheets URL (or return the raw ID).
 function parseFileId(input) {
   if (!input) return null;
@@ -391,33 +187,6 @@ function parseFileId(input) {
   return null;
 }
 
-// ── SA lifecycle helpers (used by runner.js revoke flow) ─────────────────────
-
-// Reads the SA email for a user without loading the full SA JSON into scope.
-function getSaEmail(userId) {
-  const sa = parseSaJson(userId);
-  return sa ? sa.client_email : null;
-}
-
-// Deletes the GCP Service Account for a user. Best-effort — errors are logged
-// but don't fail the revoke (the local token file is the source of truth).
-async function deleteServiceAccount(userId) {
-  const saEmail = getSaEmail(userId);
-  if (!saEmail) return { deleted: false, reason: 'no_sa_configured' };
-  let adcToken;
-  try { adcToken = await getAdcToken(); }
-  catch (e) { return { deleted: false, reason: `adc_error: ${e.message}` }; }
-  const url = `https://iam.googleapis.com/v1/projects/${GCP_PROJECT}/serviceAccounts/${encodeURIComponent(saEmail)}`;
-  const res = await fetch(url, {
-    method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${adcToken}` },
-    signal: AbortSignal.timeout(10000),
-  });
-  if (res.ok || res.status === 404) return { deleted: true };
-  const err = await res.json().catch(() => ({}));
-  return { deleted: false, reason: `gcp_${res.status}: ${err.error?.message || res.statusText}` };
-}
-
 // ── Tools ─────────────────────────────────────────────────────────────────────
 
 module.exports = {
@@ -425,8 +194,6 @@ module.exports = {
   // These tools need no SA — expose them before gdrive_setup so Claude never
   // reflexively calls gdrive_setup for public files/folders.
   setupTools: ['gdrive_setup', 'gdrive_status', 'gdrive_public_sheet', 'gdrive_public_folder'],
-  deleteServiceAccount,
-
   tools: {
 
     gdrive_setup: {
@@ -538,11 +305,7 @@ module.exports = {
         }
         const saJson  = JSON.parse(Buffer.from(keyData.privateKeyData, 'base64').toString('utf8'));
 
-        // Save to user token file
-        const tokensDir = path.join(os.homedir(), 'agent-tokens', userId);
-        fs.mkdirSync(tokensDir, { recursive: true });
-        fs.writeFileSync(path.join(tokensDir, 'gdrive'), JSON.stringify(saJson), { mode: 0o600 });
-        // Note: not setting GDRIVE_SA_JSON in process.env — the MCP server reads from disk via USER_ID
+        writeServiceAccount(userId, saJson);
 
         return {
           status: 'created',

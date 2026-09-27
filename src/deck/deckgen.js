@@ -1,12 +1,19 @@
 #!/usr/bin/env node
-// deckgen: Markdown → .pptx + .pdf без LLM. Раскладка выбирается правилами по содержимому слайда.
-// Использование: node deckgen.js deck.md [--out dir] [--name file] [--theme dark|light] [--no-pdf] [--png]
+// deckgen: Markdown → .pptx + .html + .pdf без LLM. Раскладка выбирается правилами по содержимому слайда.
+// Формат разметки: src/deck/deckgen-markdown-format.md. Программно: renderDeck() (его зовёт MCP-инструмент deck_render).
+// CLI: node src/deck/deckgen.js deck.md [--out dir] [--name file] [--theme dark|light] [--accent HEX]
+//        [--no-pdf] [--png] [--report file.json] [--strict]
+//   --report  пишет тот же JSON-отчёт, что и stdout, в файл (каталог создаётся сам)
+//   --strict  код выхода 2, если есть warnings (текст не влез) — для машинной проверки в плейбуке
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const { C, setTheme, Slide, highlight, toPptx, toHtml } = require('./engine');
+const { withChromium } = require('../render/chromium');
 
 const W = 960, H = 540, M = 48, CW = W - 2 * M;
+// Накопитель предупреждений текущего рендера — renderDeck() обнуляет его в начале.
 const warnings = [];
 
 // ---------- оценка размера текста (детерминированно, без рендера) ----------
@@ -321,52 +328,82 @@ function cardsBlockColumn(sl, x, y, w, h, cards, where) {
 
 // ---------- PDF ----------
 async function toPdf(html, file, pngDir) {
-  let pw;
-  try { pw = require('playwright-core'); } catch { pw = require('playwright'); }
-  const exe = ['/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find(f => fs.existsSync(f));
-  const b = await pw.chromium.launch(exe ? { executablePath: exe } : {});
-  const p = await b.newPage();
-  const i0 = html.indexOf('<body>') + 6, head = html.slice(0, i0);
-  const parts = html.slice(i0).replace('</body></html>', '').split('<div class="s">').slice(1);
-  const tmp = fs.mkdtempSync('/tmp/deckgen-'); const files = [];
-  // Chrome ужимает многостраничную печать — печатаем по слайду и склеиваем
-  for (let i = 0; i < parts.length; i++) {
-    fs.writeFileSync(`${tmp}/one.html`, head + '<div class="s">' + parts[i] + '</body></html>');
-    await p.goto(`file://${tmp}/one.html`);
-    const f = `${tmp}/${String(i + 1).padStart(3, '0')}.pdf`;
-    await p.pdf({ path: f, preferCSSPageSize: true, printBackground: true });
-    files.push(f);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'deckgen-'));
+  try {
+    await withChromium(async (b) => {
+      const p = await b.newPage();
+      const i0 = html.indexOf('<body>') + 6, head = html.slice(0, i0);
+      const parts = html.slice(i0).replace('</body></html>', '').split('<div class="s">').slice(1);
+      const files = [];
+      // Chrome ужимает многостраничную печать — печатаем по слайду и склеиваем
+      for (let i = 0; i < parts.length; i++) {
+        fs.writeFileSync(path.join(tmp, 'one.html'), head + '<div class="s">' + parts[i] + '</body></html>');
+        await p.goto(`file://${path.join(tmp, 'one.html')}`);
+        const f = path.join(tmp, `${String(i + 1).padStart(3, '0')}.pdf`);
+        await p.pdf({ path: f, preferCSSPageSize: true, printBackground: true });
+        files.push(f);
+      }
+      // execFile с массивом аргументов: имена файлов приходят от пользователя, shell не нужен.
+      if (files.length > 1) execFileSync('pdfunite', [...files, file]);
+      else fs.copyFileSync(files[0], file);
+    });
+    if (pngDir) { fs.mkdirSync(pngDir, { recursive: true }); execFileSync('pdftoppm', ['-r', '50', '-png', file, path.join(pngDir, 'p')]); }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
-  await b.close();
-  execSync(files.length > 1 ? `pdfunite ${files.join(' ')} "${file}"` : `cp ${files[0]} "${file}"`);
-  if (pngDir) { fs.mkdirSync(pngDir, { recursive: true }); execSync(`pdftoppm -r 50 -png "${file}" "${pngDir}/p"`); }
-  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// ---------- API ----------
+/**
+ * Отрендерить markdown-колоду в pptx + html (+ pdf).
+ * @returns {Promise<{slides:number, pptx:string, html:string, pdf:string|null, warnings:string[]}>}
+ */
+async function renderDeck({ input, outDir, name, theme, accent, pdf = true, png = false }) {
+  warnings.length = 0;
+  const { meta, body } = parseFront(fs.readFileSync(input, 'utf8'));
+  meta._dir = path.dirname(path.resolve(input));
+  setTheme(theme || meta.theme || 'dark');
+  C.accent = (accent || meta.accent || C.green).replace('#', '');
+  outDir = outDir || path.dirname(input);
+  name = name || meta.file || path.basename(input, path.extname(input));
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const slides = build(splitSlides(body).map(parseSlide), meta);
+  const pptxPath = path.join(outDir, name + '.pptx');
+  await toPptx(slides, pptxPath, meta);
+  const html = toHtml(slides);
+  const htmlPath = path.join(outDir, name + '.html');
+  fs.writeFileSync(htmlPath, html);
+  let pdfPath = null;
+  if (pdf) { pdfPath = path.join(outDir, name + '.pdf'); await toPdf(html, pdfPath, png ? path.join(outDir, name + '-png') : null); }
+  return { slides: slides.length, pptx: pptxPath, html: htmlPath, pdf: pdfPath, warnings: [...warnings] };
+}
+
+// Только синтаксис/раскладка, без файлов — быстрая проверка «влезает ли текст».
+function checkDeck(src) {
+  warnings.length = 0;
+  const { meta, body } = parseFront(src);
+  meta._dir = process.cwd();
+  const slides = build(splitSlides(body).map(parseSlide), meta);
+  return { slides: slides.length, warnings: [...warnings] };
 }
 
 // ---------- CLI ----------
+const VALUE_FLAGS = ['--out', '--name', '--theme', '--accent', '--report'];
 async function main() {
   const args = process.argv.slice(2);
   const opt = k => { const i = args.indexOf('--' + k); return i >= 0 ? args[i + 1] : null; };
-  const inFile = args.find(a => !a.startsWith('--') && !['--out', '--name', '--theme', '--accent'].includes(args[args.indexOf(a) - 1]));
-  if (!inFile) { console.error('usage: deckgen deck.md [--out dir] [--name file] [--theme dark|light] [--accent HEX] [--no-pdf] [--png]'); process.exit(1); }
-  const { meta, body } = parseFront(fs.readFileSync(inFile, 'utf8'));
-  meta._dir = path.dirname(path.resolve(inFile));
-  const theme = opt('theme') || meta.theme || 'dark';
-  setTheme(theme);
-  C.accent = (opt('accent') || meta.accent || C.green).replace('#', '');
-  const outDir = opt('out') || path.dirname(inFile);
-  const name = opt('name') || meta.file || path.basename(inFile, path.extname(inFile));
-  fs.mkdirSync(outDir, { recursive: true });
-
-  const parsed = splitSlides(body).map(parseSlide);
-  const slides = build(parsed, meta);
-  const pptx = path.join(outDir, name + '.pptx');
-  await toPptx(slides, pptx, meta);
-  const html = toHtml(slides);
-  fs.writeFileSync(path.join(outDir, name + '.html'), html);
-  let pdf = null;
-  if (!args.includes('--no-pdf')) { pdf = path.join(outDir, name + '.pdf'); await toPdf(html, pdf, args.includes('--png') ? path.join(outDir, name + '-png') : null); }
-  console.log(JSON.stringify({ slides: slides.length, pptx, pdf, warnings }, null, 2));
+  const input = args.find((a, i) => !a.startsWith('--') && !VALUE_FLAGS.includes(args[i - 1]));
+  if (!input) { console.error('usage: deckgen deck.md [--out dir] [--name file] [--theme dark|light] [--accent HEX] [--no-pdf] [--png] [--report file.json] [--strict]'); process.exit(1); }
+  const result = await renderDeck({
+    input, outDir: opt('out'), name: opt('name'), theme: opt('theme'), accent: opt('accent'),
+    pdf: !args.includes('--no-pdf'), png: args.includes('--png'),
+  });
+  const report = JSON.stringify(result, null, 2);
+  const reportFile = opt('report');
+  if (reportFile) { fs.mkdirSync(path.dirname(path.resolve(reportFile)), { recursive: true }); fs.writeFileSync(reportFile, report + '\n'); }
+  console.log(report);
+  if (args.includes('--strict') && result.warnings.length) process.exit(2);
 }
 if (require.main === module) main().catch(e => { console.error(e); process.exit(1); });
-module.exports = { parseSlide, splitSlides, build };
+module.exports = { parseSlide, splitSlides, build, renderDeck, checkDeck };

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// MCP server — sales-skills
+// MCP server — documents-skills
 // Raw JSON-RPC 2.0 over stdio (no SDK dependency, avoids ESM/CJS issues)
 // Mirrors trained-assist-agent's src/mcp-skills/index.js exactly — same contract,
 // so this repo plugs into a profile's .mcp.json the same way trained-assist-hh-skill does.
@@ -40,7 +40,7 @@ rl.on('line', async (line) => {
       respond(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'freelance-skills', version: '1.0.0' },
+        serverInfo: { name: 'documents-skills', version: '1.0.0' },
       });
 
     } else if (method === 'tools/list') {

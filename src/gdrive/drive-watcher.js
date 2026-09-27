@@ -8,13 +8,15 @@
 //
 // Scope: drive (full) required — drive.readonly misses externally-shared files.
 //
-// State stored in ~/agent-tokens/{userId}/gdrive-seen as JSON:
+// Runs inside core's process (server.js loads it via siblingLib('documents', …)).
+//
+// State stored in <AGENT_TOKENS_DIR>/{userId}/gdrive-seen as JSON:
 //   { type: 'changes', pageToken: '...' }
 
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
+const { readServiceAccount, getAccessToken, profileTokenDir } = require('./google-auth');
+const { tokensRoot } = require('../data-paths');
 
 const TG_BASE = (process.env.TELEGRAM_API_URL || 'https://api.telegram.org').replace(/\/$/, '');
 
@@ -22,45 +24,8 @@ function _readChatId(userId) {
   // Support both legacy numeric dirs (chatId == userId) and named profile dirs
   if (/^-?\d+$/.test(userId)) return userId;
   try {
-    return fs.readFileSync(path.join(os.homedir(), 'agent-tokens', userId, '.chatid'), 'utf8').trim() || null;
+    return fs.readFileSync(path.join(profileTokenDir(userId), '.chatid'), 'utf8').trim() || null;
   } catch { return null; }
-}
-
-// ── SA JWT auth ───────────────────────────────────────────────────────────────
-
-const _tokenCache = new Map();
-
-function _makeJwt(sa) {
-  const now = Math.floor(Date.now() / 1000);
-  const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({
-    iss: sa.client_email,
-    scope: 'https://www.googleapis.com/auth/drive', // full scope required for SA file access
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: now + 3600,
-  })).toString('base64url');
-  const data = `${header}.${payload}`;
-  const sign = crypto.createSign('RSA-SHA256');
-  sign.update(data);
-  return `${data}.${sign.sign(sa.private_key, 'base64url')}`;
-}
-
-async function _getSaToken(sa) {
-  const key = sa.client_email;
-  const cached = _tokenCache.get(key);
-  if (cached && Date.now() < cached.expiresAt - 60_000) return cached.token;
-  const jwt = _makeJwt(sa);
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
-    signal: AbortSignal.timeout(10000),
-  });
-  const data = await res.json();
-  if (!data.access_token) throw new Error(`SA auth failed: ${JSON.stringify(data)}`);
-  _tokenCache.set(key, { token: data.access_token, expiresAt: Date.now() + 3600_000 });
-  return data.access_token;
 }
 
 // ── File catalog ──────────────────────────────────────────────────────────────
@@ -89,7 +54,7 @@ async function _readSnippet(fileId, mimeType, token) {
 }
 
 async function _catalogFile(userId, file, token) {
-  const catalogPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-catalog.json');
+  const catalogPath = path.join(profileTokenDir(userId), 'gdrive-catalog.json');
   let catalog = [];
   try { catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8')); } catch {}
   if (catalog.find(e => e.id === file.id)) return;
@@ -148,17 +113,12 @@ function _mimeLabel(mimeType = '') {
 }
 
 async function _checkUser(userId, botToken) {
-  const saFile    = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive');
-  const stateFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-seen');
-  if (!fs.existsSync(saFile)) return;
-
-  let sa;
-  try { sa = JSON.parse(fs.readFileSync(saFile, 'utf8')); }
-  catch { return; }
-  if (!sa?.client_email || !sa?.private_key) return;
+  const stateFile = path.join(profileTokenDir(userId), 'gdrive-seen');
+  const sa = readServiceAccount(userId);
+  if (!sa) return;
 
   let token;
-  try { token = await _getSaToken(sa); }
+  try { token = await getAccessToken(sa); }
   catch (e) {
     console.error(`[drive-watcher] SA auth error userId=${userId}:`, e.message);
     return;
@@ -227,7 +187,7 @@ async function _checkUser(userId, botToken) {
 
   console.log(`[drive-watcher] userId=${userId}: ${newFiles.length} new file(s) via Changes API`);
 
-  const catalogPath = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-catalog.json');
+  const catalogPath = path.join(profileTokenDir(userId), 'gdrive-catalog.json');
   let existingIds = new Set();
   try { existingIds = new Set(JSON.parse(fs.readFileSync(catalogPath, 'utf8')).map(e => e.id)); } catch {}
 
@@ -248,7 +208,7 @@ async function _checkUser(userId, botToken) {
       ? `📂 Открыли доступ к ${label} [${name}](${link})\nОт: ${owner}\n\nСкажи что делать с файлом.`
       : `📂 Открыли доступ к ${label} «${name}»\nОт: ${owner}\n\nСкажи что делать с файлом.`;
 
-    const mutedFile = path.join(os.homedir(), 'agent-tokens', String(userId), 'gdrive-notif-muted');
+    const mutedFile = path.join(profileTokenDir(userId), 'gdrive-notif-muted');
     if (fs.existsSync(mutedFile)) {
       console.log(`[drive-watcher] userId=${userId}: notifications muted, skipping TG send for "${name}"`);
       continue;
@@ -272,7 +232,7 @@ async function _checkUser(userId, botToken) {
 // ── Scan all users ────────────────────────────────────────────────────────────
 
 async function pollDriveChanges({ botToken }) {
-  const tokensBase = path.join(os.homedir(), 'agent-tokens');
+  const tokensBase = tokensRoot();
   if (!fs.existsSync(tokensBase)) return;
 
   let entries;
@@ -288,7 +248,4 @@ async function pollDriveChanges({ botToken }) {
   }
 }
 
-// trackChat — kept for API compatibility with server.js
-function trackChat() {}
-
-module.exports = { trackChat, pollDriveChanges };
+module.exports = { pollDriveChanges };
