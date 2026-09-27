@@ -1,5 +1,5 @@
 ---
-server: trained-skills
+server: documents-skills
 module: 50-gdrive.js
 when: present
 ---

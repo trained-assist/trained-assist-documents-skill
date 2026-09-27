@@ -26,5 +26,7 @@ jobs:
         with:
           repository: trained-assist/trained-assist-agent
           path: .core
+      - name: Playbook matches core's Playbook v1 schema
+        run: node --test tests/presentation-playbook.test.js
       - name: Core MCP contract (deploy gate)
         run: node .core/scripts/check-mcp-conformance.js .
