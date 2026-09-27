@@ -1,9 +1,10 @@
 {
   "id": "presentation-creation",
-  "version": 2,
-  "scope": "profile",
+  "version": 3,
+  "scope": "system",
   "title": "Создание презентации с нуля",
   "goal_template": "Создать презентацию на тему: {input}",
+  "user_value_template": "Готовая презентация на русском и английском (pptx для правки, pdf для отправки, html для ссылки): тема исследована, структура и направление согласованы с пользователем, весь текст влезает на слайды.",
   "defaults": {
     "max_attempts": 3,
     "execution_timeout_seconds": 600,
@@ -16,32 +17,33 @@
       "steps": [
         {
           "title": "Сбор запроса пользователя",
-          "instructions": "Соберите сырой запрос пользователя: тема, цель, аудитория, контекст, желаемая длительность/число слайдов. Сохраните информацию в файл deck/ideation.md.",
+          "instructions": "Собери запрос: тема, цель, аудитория, контекст, длительность выступления / число слайдов. Чего не хватает — спроси у пользователя одним сообщением. Запиши в deck/ideation.md.",
           "execution_kind": "agent",
           "executor_role": "researcher",
           "minimum_model_level": "bachelor",
           "context_budget": "medium",
           "validation": {
-            "file_exists": "deck/ideation.md",
-            "file_not_empty": "deck/ideation.md"
+            "file_exists": "deck/ideation.md"
           }
         },
         {
           "title": "Исследование темы",
-          "instructions": "Проведите исследование по идеям/теме запроса, используя MCP-инструмент hermes_research/hermes_run. Соберите факты, возможные углы подачи, примеры, возражения аудитории. Результат сохраните в deck/research.md с указанием источников. Обсудите результаты с пользователем.",
+          "instructions": "Исследуй тему через hermes_research: факты, цифры, примеры, возможные углы подачи, возражения аудитории. Сохрани в deck/research.md; у каждого факта — ссылка на источник (URL).",
           "execution_kind": "agent",
           "executor_role": "researcher",
           "minimum_model_level": "master",
           "context_budget": "large",
           "validation": {
             "file_exists": "deck/research.md",
-            "file_not_empty": "deck/research.md",
-            "contains_sources": "deck/research.md"
+            "command_exit_zero": {
+              "command": "grep -Eq 'https?://' deck/research.md",
+              "timeout_ms": 10000
+            }
           }
         },
         {
-          "title": "Обсуждение с пользователем",
-          "instructions": "Представьте пользователю найденные факты и предложите 2-3 угла подачи. Обсудите и согласуйте направление презентации и ключевое сообщение.",
+          "title": "Согласование направления",
+          "instructions": "Покажи пользователю ключевые находки и предложи 2–3 угла подачи. Согласуй направление и главное сообщение презентации; итог допиши в конец deck/ideation.md разделом «Согласовано».",
           "execution_kind": "agent",
           "executor_role": "reviewer",
           "minimum_model_level": "bachelor",
@@ -55,24 +57,22 @@
     },
     {
       "id": "outline",
-      "title": "Структура презентации",
+      "title": "Структура",
       "steps": [
         {
-          "title": "Составление структуры колоды",
-          "instructions": "Составьте структуру колоды: список слайдов с заголовками и тегами (ПРОТОТИП/ТЗ/ИТОГ/РИСК и т.п.). Сохраните в deck/outline.md.",
+          "title": "Структура колоды",
+          "instructions": "Составь структуру: список слайдов с заголовками и тегами ([ПРОТОТИП], [ТЗ], [ИТОГ], [РИСК] …) и одной строкой — что на слайде. Сохрани в deck/outline.md.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "master",
           "context_budget": "medium",
           "validation": {
-            "file_exists": "deck/outline.md",
-            "file_not_empty": "deck/outline.md",
-            "outline_format_valid": true
+            "file_exists": "deck/outline.md"
           }
         },
         {
-          "title": "Согласование структуры с пользователем",
-          "instructions": "Представьте пользователю структуру колоды и получите согласование.",
+          "title": "Согласование структуры",
+          "instructions": "Покажи пользователю структуру колоды и получи согласие или правки; правки внеси в deck/outline.md.",
           "execution_kind": "agent",
           "executor_role": "reviewer",
           "minimum_model_level": "bachelor",
@@ -86,137 +86,97 @@
     },
     {
       "id": "content",
-      "title": "Наполнение контентом",
+      "title": "Черновик",
       "steps": [
         {
-          "title": "Написание черновика колоды",
-          "instructions": "Напишите черновик колоды в deckgen-разметке (deck.content.md). Сосредоточьтесь только на текстах, без координат и CSS.",
+          "title": "Черновик колоды в разметке deckgen",
+          "instructions": "Вызови deck_markup_guide, затем напиши черновик всей колоды по deck/outline.md в разметке deckgen в deck/content.md. Только тексты и структура слайдов — никаких координат и CSS. Прогони deck_check и исправь слайды из warnings.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "bachelor",
           "context_budget": "large",
           "validation": {
-            "file_exists": "deck.content.md",
-            "file_not_empty": "deck.content.md",
-            "deckgen_syntax_valid": true
+            "file_exists": "deck/content.md",
+            "command_exit_zero": {
+              "command": "node -e \"const t=require('fs').readFileSync('deck/content.md','utf8');process.exit(/^---\\s*$/m.test(t)&&/^#{1,2} /m.test(t)?0:1)\"",
+              "timeout_ms": 10000
+            }
           }
         }
       ]
     },
     {
       "id": "rewrite",
-      "title": "Переработка текстов",
+      "title": "Редактура",
       "steps": [
         {
-          "title": "Переработка текстов на русском",
-          "instructions": "Перепишите тексты колоды (deck.content.md) на хороший литературный русский язык, используя MCP-инструмент hermes_run с сильной моделью Google Gemini (например, google/gemini-2.5-flash или google/gemini-2.5-pro через OpenRouter). Категорически запрещено использовать DeepSeek или любые модели deepseek-стека. Результат сохраните в deck.ru.md.",
+          "title": "Литературная редактура (русский)",
+          "instructions": "Перепиши тексты колоды deck/content.md на хороший литературный русский язык и сохрани в deck/deck.ru.md. Разметку deckgen (разделители ---, теги, ###-карточки, код, Note:) сохранить как есть — меняется только текст. Для редактуры используй hermes_run на Gemini (решение владельца: Gemini лучше всего пишет презентационный текст); модели deepseek-стека для этого шага не использовать.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "doctor",
           "context_budget": "large",
           "validation": {
-            "file_exists": "deck.ru.md",
-            "file_not_empty": "deck.ru.md",
-            "language_is_russian": "deck.ru.md"
+            "file_exists": "deck/deck.ru.md",
+            "command_exit_zero": {
+              "command": "node -e \"const t=require('fs').readFileSync('deck/deck.ru.md','utf8');const all=(t.match(/\\p{L}/gu)||[]).length;const hit=(t.match(/\\p{Script=Cyrillic}/gu)||[]).length;process.exit(all&&hit/all>=0.6?0:1)\"",
+              "timeout_ms": 10000
+            }
           }
         },
         {
-          "title": "Переработка текстов на английском",
-          "instructions": "Перепишите тексты колоды (deck.content.md) на хороший литературный английский язык, используя MCP-инструмент hermes_run с сильной моделью Google Gemini (например, google/gemini-2.5-flash или google/gemini-2.5-pro через OpenRouter). Категорически запрещено использовать DeepSeek или любые модели deepseek-стека. Результат сохраните в deck.en.md.",
+          "title": "Литературная редактура (английский)",
+          "instructions": "Перепиши тексты колоды deck/content.md на хороший литературный английский язык и сохрани в deck/deck.en.md. Разметку deckgen (разделители ---, теги, ###-карточки, код, Note:) сохранить как есть — меняется только текст. Для редактуры используй hermes_run на Gemini (решение владельца: Gemini лучше всего пишет презентационный текст); модели deepseek-стека для этого шага не использовать.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "doctor",
           "context_budget": "large",
           "validation": {
-            "file_exists": "deck.en.md",
-            "file_not_empty": "deck.en.md",
-            "language_is_english": "deck.en.md"
+            "file_exists": "deck/deck.en.md",
+            "command_exit_zero": {
+              "command": "node -e \"const t=require('fs').readFileSync('deck/deck.en.md','utf8');const all=(t.match(/\\p{L}/gu)||[]).length;const hit=(t.match(/\\p{Script=Latin}/gu)||[]).length;process.exit(all&&hit/all>=0.8?0:1)\"",
+              "timeout_ms": 10000
+            }
           }
         }
       ]
     },
     {
       "id": "render",
-      "title": "Рендеринг презентации",
+      "title": "Рендер",
       "steps": [
         {
-          "title": "Рендеринг русской версии",
-          "instructions": "Прогоните deckgen для deck.ru.md, сгенерируйте pptx, html и pdf. Используйте команду: node /home/vova/tools/deckgen/deckgen.js deck.ru.md --out output/ru --name presentation-ru > output/ru/deckgen.json",
-          "execution_kind": "programmatic",
-          "validation": {
-            "command_succeeded": "node /home/vova/tools/deckgen/deckgen.js deck.ru.md --out output/ru --name presentation-ru > output/ru/deckgen.json",
-            "file_exists": "output/ru/presentation-ru.pdf"
-          },
-          "execution_timeout_seconds": 900
-        },
-        {
-          "title": "Рендеринг английской версии",
-          "instructions": "Прогоните deckgen для deck.en.md, сгенерируйте pptx, html и pdf. Используйте команду: node /home/vova/tools/deckgen/deckgen.js deck.en.md --out output/en --name presentation-en > output/en/deckgen.json",
-          "execution_kind": "programmatic",
-          "validation": {
-            "command_succeeded": "node /home/vova/tools/deckgen/deckgen.js deck.en.md --out output/en --name presentation-en > output/en/deckgen.json",
-            "file_exists": "output/en/presentation-en.pdf"
-          },
-          "execution_timeout_seconds": 900
-        }
-      ]
-    },
-    {
-      "id": "fit-gate",
-      "title": "Проверка и исправление",
-      "steps": [
-        {
-          "title": "Проверка предупреждений Deckgen (русская версия)",
-          "instructions": "Проверьте вывод deckgen для русской версии из файла output/ru/deckgen.json на наличие предупреждений (warnings). Если warnings не пусты, перейдите к исправлению.",
-          "execution_kind": "programmatic",
-          "validation": {
-            "deckgen_warnings_empty": "output/ru/deckgen.json"
-          },
-          "on_fail": [
-            {
-              "type": "check",
-              "text": "Обнаружены предупреждения в русской версии презентации. Требуется исправление."
-            }
-          ]
-        },
-        {
-          "title": "Исправление предупреждений (русская версия)",
-          "instructions": "Перепишите только затронутые слайды в deck.ru.md, чтобы устранить предупреждения deckgen. Используйте дешёвую модель с ограниченным бюджетом символов. Максимум 3 попытки. После исправления повторно запустите рендер deckgen для проверки: node /home/vova/tools/deckgen/deckgen.js deck.ru.md --out output/ru --name presentation-ru > output/ru/deckgen.json",
+          "title": "Рендер и подгонка (русская версия)",
+          "instructions": "Отрендерь deck/deck.ru.md инструментом deck_render (input: deck/deck.ru.md, out_dir: output/ru, name: presentation-ru). Если в ответе есть warnings (текст не влез) — перепиши ТОЛЬКО перечисленные слайды в deck/deck.ru.md (сократи или разбей слайд), проверь deck_check и отрендерь снова. Смысл и порядок слайдов не менять.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "bachelor",
           "context_budget": "small",
           "max_attempts": 3,
+          "execution_timeout_seconds": 900,
           "validation": {
-            "command_succeeded": "node /home/vova/tools/deckgen/deckgen.js deck.ru.md --out output/ru --name presentation-ru > output/ru/deckgen.json",
-            "deckgen_warnings_empty": "output/ru/deckgen.json"
+            "file_exists": "output/ru/presentation-ru.pdf",
+            "command_exit_zero": {
+              "command": "node -e \"const r=JSON.parse(require('fs').readFileSync('output/ru/presentation-ru.deckgen.json','utf8'));if(r.warnings.length){console.log(r.warnings.join('\\n'));process.exit(1)}\"",
+              "timeout_ms": 10000
+            }
           }
         },
         {
-          "title": "Проверка предупреждений Deckgen (английская версия)",
-          "instructions": "Проверьте вывод deckgen для английской версии из файла output/en/deckgen.json на наличие предупреждений (warnings). Если warnings не пусты, перейдите к исправлению.",
-          "execution_kind": "programmatic",
-          "validation": {
-            "deckgen_warnings_empty": "output/en/deckgen.json"
-          },
-          "on_fail": [
-            {
-              "type": "check",
-              "text": "Обнаружены предупреждения в английской версии презентации. Требуется исправление."
-            }
-          ]
-        },
-        {
-          "title": "Исправление предупреждений (английская версия)",
-          "instructions": "Перепишите только затронутые слайды в deck.en.md, чтобы устранить предупреждения deckgen. Используйте дешёвую модель с ограниченным бюджетом символов. Максимум 3 попытки. После исправления повторно запустите рендер deckgen для проверки: node /home/vova/tools/deckgen/deckgen.js deck.en.md --out output/en --name presentation-en > output/en/deckgen.json",
+          "title": "Рендер и подгонка (английская версия)",
+          "instructions": "Отрендерь deck/deck.en.md инструментом deck_render (input: deck/deck.en.md, out_dir: output/en, name: presentation-en). Если в ответе есть warnings (текст не влез) — перепиши ТОЛЬКО перечисленные слайды в deck/deck.en.md (сократи или разбей слайд), проверь deck_check и отрендерь снова. Смысл и порядок слайдов не менять.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "bachelor",
           "context_budget": "small",
           "max_attempts": 3,
+          "execution_timeout_seconds": 900,
           "validation": {
-            "command_succeeded": "node /home/vova/tools/deckgen/deckgen.js deck.en.md --out output/en --name presentation-en > output/en/deckgen.json",
-            "deckgen_warnings_empty": "output/en/deckgen.json"
+            "file_exists": "output/en/presentation-en.pdf",
+            "command_exit_zero": {
+              "command": "node -e \"const r=JSON.parse(require('fs').readFileSync('output/en/presentation-en.deckgen.json','utf8'));if(r.warnings.length){console.log(r.warnings.join('\\n'));process.exit(1)}\"",
+              "timeout_ms": 10000
+            }
           }
         }
       ]
@@ -226,25 +186,14 @@
       "title": "Доставка",
       "steps": [
         {
-          "title": "Предоставление ссылок пользователю",
-          "instructions": "Предоставьте пользователю пути к готовым pptx/pdf/html файлам для русской и английской версий.",
+          "title": "Отправка файлов пользователю",
+          "instructions": "Отправь пользователю PDF и PPTX обеих версий (output/ru/presentation-ru.*, output/en/presentation-en.*) через tg_send_file. Пути на сервере пользователю не присылать — он их не откроет. Если пользователь просил ссылку — опубликуй HTML-версию через publish_page и пришли ссылку.",
           "execution_kind": "agent",
           "executor_role": "reviewer",
           "minimum_model_level": "bachelor",
           "context_budget": "small",
           "validation": {
-            "user_notified_with_links": true
-          }
-        },
-        {
-          "title": "Публикация HTML (опционально)",
-          "instructions": "При необходимости опубликуйте HTML-версии презентаций через publish_page и предоставьте ссылки.",
-          "execution_kind": "agent",
-          "executor_role": "developer",
-          "minimum_model_level": "bachelor",
-          "context_budget": "small",
-          "validation": {
-            "html_published_if_requested": true
+            "user_received_files": true
           }
         }
       ]
@@ -255,14 +204,14 @@
       {
         "type": "notify",
         "to": "user",
-        "text": "Презентация успешно создана и доставлена."
+        "text": "Презентация готова и отправлена."
       }
     ],
     "task_failed": [
       {
         "type": "notify",
         "to": "user",
-        "text": "Произошла ошибка при создании презентации. Пожалуйста, свяжитесь с поддержкой."
+        "text": "Не получилось довести презентацию до конца — напиши, на каком шаге продолжить."
       }
     ]
   }

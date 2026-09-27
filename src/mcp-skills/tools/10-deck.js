@@ -43,7 +43,7 @@ module.exports = {
 
     deck_render: {
       description: 'Отрендерить колоду deck.md в .pptx (редактируемый, открывается в PowerPoint/Keynote) + .html + .pdf. ' +
-        'Возвращает пути к файлам и warnings — где текст не влез (разбей слайд или сократи и отрендерь снова). ~5 с на 10 слайдов.',
+        'Возвращает пути к файлам и warnings — где текст не влез (разбей слайд или сократи и отрендерь снова); тот же отчёт пишется в <name>.deckgen.json рядом с файлами. ~5 с на 10 слайдов.',
       inputSchema: {
         type: 'object',
         required: ['input'],
@@ -57,11 +57,18 @@ module.exports = {
           png:     { type: 'boolean', description: 'Дополнительно PNG-превью слайдов (по умолчанию false)' },
         },
       },
-      handler: async ({ input, out_dir, name, theme, accent, pdf = true, png = false }) => renderDeck({
-        input: resolvePath(input),
-        outDir: resolvePath(out_dir),
-        name, theme, accent, pdf, png,
-      }),
+      handler: async ({ input, out_dir, name, theme, accent, pdf = true, png = false }) => {
+        const result = await renderDeck({
+          input: resolvePath(input),
+          outDir: resolvePath(out_dir),
+          name, theme, accent, pdf, png,
+        });
+        // Machine-readable report next to the files: playbook steps check
+        // `warnings` with a plain command instead of asking a model.
+        const report = result.pptx.replace(/\.pptx$/, '.deckgen.json');
+        fs.writeFileSync(report, JSON.stringify(result, null, 2) + '\n');
+        return { ...result, report };
+      },
     },
   },
 };

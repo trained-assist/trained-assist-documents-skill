@@ -4,7 +4,9 @@
   "private": true,
   "description": "Documents domain skill — presentations (deckgen → pptx/html/pdf), markdown → html/pdf/docx, Google Drive — MCP server mounted by trained-assist-agent as the documents-skills sibling",
   "main": "src/mcp-skills/index.js",
-  "bin": { "deckgen": "src/deck/deckgen.js" },
+  "bin": {
+    "deckgen": "src/deck/deckgen.js"
+  },
   "scripts": {
     "check": "node -e \"require('fs').readdirSync('src/mcp-skills/tools').forEach(f => require('./src/mcp-skills/tools/'+f))\" && node --check src/mcp-skills/index.js && node -e \"JSON.parse(require('fs').readFileSync('playbooks/presentation-creation.json','utf8'))\"",
     "test": "node --test tests/*.test.js"
@@ -15,5 +17,8 @@
   "dependencies": {
     "playwright-core": "1.62.1",
     "pptxgenjs": "4.0.1"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0"
   }
 }
