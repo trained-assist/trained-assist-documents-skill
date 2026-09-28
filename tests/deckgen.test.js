@@ -7,7 +7,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { checkDeck, renderDeck, splitSlides } = require('../src/deck/deckgen');
+const { checkDeck, renderDeck, splitSlides, parseSlide, build } = require('../src/deck/deckgen');
+const { lineWidth, widestTokenEm } = require('../src/deck/text-widths');
 
 const root = path.resolve(__dirname, '..');
 const demo = path.join(root, 'examples', 'demo-deck.md');
@@ -45,4 +46,42 @@ test('CLI --strict exits 2 on warnings and --report creates its directory', () =
   const r = spawnSync(process.execPath, [path.join(root, 'src/deck/deckgen.js'), 'deck.md', '--out', 'out', '--no-pdf', '--report', report, '--strict'], { cwd: dir, encoding: 'utf8' });
   assert.equal(r.status, 2, r.stderr);
   assert.ok(JSON.parse(fs.readFileSync(report, 'utf8')).warnings.length > 0);
+});
+
+// Схема-цепочка: подпись печатается жирным по центру узла. Раньше кегль выбирался
+// только по высоте, и слово шире узла рвалось посреди («ДОСТАВЛЕ/НО»).
+const flowSlide = '## Схема\nВ ОЧЕРЕДИ -> ДОСТАВЛЕНО -> ОБРАБОТКА -> РЕЗУЛЬТАТ СОХРАНЁН -> ACK\n';
+
+function flowLabels(src) {
+  const slides = build(splitSlides(src).map(parseSlide), {});
+  return slides[0].items
+    .filter(i => i.k === 'txt' && i.o.align === 'center' && i.o.bold)
+    .map(i => ({ text: i.runs.map(r => r.t).join(''), size: i.o.size, w: i.w }));
+}
+
+test('flow labels are sized so no word breaks mid-way', () => {
+  const labels = flowLabels(flowSlide);
+  assert.equal(labels.length, 5, 'все пять узлов отрисованы');
+  for (const l of labels) {
+    assert.ok(l.text.length, 'подпись не пустая');
+    assert.ok(widestTokenEm(l.text, true) * l.size <= l.w + 0.5,
+      `«${l.text}» при ${l.size}pt шире узла ${l.w}pt — слово перенесётся посреди`);
+  }
+  assert.deepEqual(checkDeck('---\ntitle: T\n---\n' + flowSlide).warnings, []);
+});
+
+test('a word wider than the node is reported instead of silently broken', () => {
+  const long = 'AAAAAAAAAAAAAAAAAAAAAAAA';
+  const src = '---\ntitle: T\n---\n## Схема\nВ ОЧЕРЕДИ -> ' + long + ' -> X -> Y -> Z\n';
+  const r = checkDeck(src);
+  assert.ok(r.warnings.some(w => w.includes('слово шире колонки')),
+    'должно быть предупреждение о слишком длинном слове, got: ' + JSON.stringify(r.warnings));
+});
+
+test('measured widths beat the old «average 0.55» heuristic', () => {
+  // старая оценка: 10 заглавных кириллических букв считала 10*0.55 = 5.5em,
+  // реально ДОСТАВЛЕНО жирным занимает заметно больше — на этом ломались узлы
+  assert.ok(lineWidth('ДОСТАВЛЕНО', true) > 6.5);
+  // разные буквы — разная ширина, а не один средний коэффициент
+  assert.ok(lineWidth('Ж', true) > lineWidth('I', true) * 2);
 });
