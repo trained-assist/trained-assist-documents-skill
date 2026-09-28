@@ -59,20 +59,27 @@ function wrapPara(para, w, size, bold) {
   }
   return lines;
 }
+// opts.maxLines — потолок строк: кегль уменьшается пропорционально, пока текст
+// не уместится и по высоте, и по числу строк (бенчмарк: блок не переезжает на 3+ строки).
+// opts.quiet — не писать предупреждения (пробный подбор, решает вызывающий код).
 function fit(text, w, h, max, min, opts = {}, where = '') {
   // Кегль не может превышать тот, при котором самое длинное НЕРАЗРЫВАЕМОЕ слово
   // влезает в колонку — иначе текст перенесётся посреди слова.
   const tokenEm = opts.mono ? 0 : widestTokenEm(text, opts.bold);
+  const { maxLines, quiet, ...box } = opts;
   let hi = max;
   if (tokenEm) {
     const byToken = Math.floor(w / tokenEm);
     if (byToken < min) {
-      warnings.push(`${where}: слово шире колонки даже в ${min}pt — сократи подпись`);
+      if (!quiet) warnings.push(`${where}: слово шире колонки даже в ${min}pt — сократи подпись`);
       hi = min;
     } else hi = Math.min(max, byToken);
   }
-  for (let s = hi; s >= min; s--) if (textHeight(text, w, s, opts) <= h) return s;
-  warnings.push(`${where}: текст не влезает даже в ${min}pt — разбей слайд или сократи`);
+  for (let s = hi; s >= min; s--) {
+    const lines = wrapCount(text, w, s, box);
+    if (lines * s * 1.2 * (box.lh || 1) <= h && (!maxLines || lines <= maxLines)) return s;
+  }
+  if (!quiet) warnings.push(`${where}: текст не влезает даже в ${min}pt — разбей слайд или сократи`);
   return min;
 }
 const plain = runs => runs.map(r => r.t).join('');
@@ -133,6 +140,10 @@ function parseSlide(src) {
       s.codes.push({ lang: lang === 'yml' ? 'yaml' : lang, src: buf.join('\n'), label }); i++; continue;
     }
     if (/^(Note|Notes|Заметки):\s*$/i.test(l.trim())) { s.notes = lines.slice(i + 1).join('\n').trim(); break; }
+    // Пустая строка закрывает текущую карточку: абзац после неё — текст слайда,
+    // а не продолжение карточки. Иначе он молча съедался карточкой и та
+    // превращалась в 6 строк мелкого шрифта.
+    if (!l.trim()) { card = null; i++; continue; }
     let m;
     if ((m = l.match(/^\[([^\]]+)\]\s*$/)) && !s.title && !s.h1) {
       const [tag, ...rest] = m[1].split('·').map(x => x.trim()); s.tag = tag; s.section = rest.join(' · ') || null;
@@ -204,11 +215,20 @@ function cardsBlock(sl, x, y, w, h, cards, where, opts = {}) {
   const cw = (w - gap * (perRow - 1)) / perRow; let ch = (h - gap * (rows - 1)) / rows;
   // один кегль на все карточки — выглядит ровнее
   const bodies = cards.map(c => plain(bulletRuns(c.body)));
-  let bs = 22;
-  const headS = Math.min(h < 140 ? 20 : 24, fit(cards.map(c => stripInline(c.head)).sort((a, b) => b.length - a.length)[0], cw - 28, 60, 26, 16, { bold: true }, where));
-  for (; bs > 14; bs--) if (bodies.every(b => textHeight(b, cw - 28, bs, { lh: 1.2 }) <= ch - 28 - headS * 1.3 - 6)) break;
-  if (bs === 14 && bodies.some(b => textHeight(b, cw - 28, 14, { lh: 1.2 }) > ch - 28 - headS * 1.3 - 6)) warnings.push(`${where}: в карточках много текста`);
-  const need = Math.max(...cards.map((c, i) => 30 + textHeight(stripInline(c.head), cw - 28, headS) + (c.body.length ? 8 + textHeight(bodies[i], cw - 28, bs, { lh: 1.2 }) : 0)));
+  const headBox = cw - 28;
+  const headS = Math.min(h < 140 ? 20 : 24, fit(cards.map(c => stripInline(c.head)).sort((a, b) => b.length - a.length)[0], headBox, 60, 26, 16, { bold: true, maxLines: 2 }, where));
+  // Иерархия «дерева» (бенчмарк — слайды докладчика): подзаголовок = 0.66 заголовка,
+  // то есть заголовок блока заметно крупнее (≈1.5×), а не почти одного кегля.
+  const HIERARCHY = 0.66, BODY_MIN = 12, BODY_MAX_LINES = 4;
+  let bs = Math.max(BODY_MIN, Math.min(22, Math.floor(headS * HIERARCHY)));
+  const bodyBox = () => ch - 28 - headS * 1.3 - 6;
+  const fits = s => s >= BODY_MIN
+    && bodies.every(b => textHeight(b, headBox, s, { lh: 1.2 }) <= bodyBox()
+        && wrapCount(b, headBox, s) <= BODY_MAX_LINES);
+  for (; bs > BODY_MIN && !fits(bs); bs--) {}
+  if (!fits(bs)) warnings.push(`${where}: в карточках много текста (больше ${BODY_MAX_LINES} строк) — сократи или раздели слайд`);
+  if (bs > 0 && headS / bs < 1.3) warnings.push(`${where}: иерархия заголовок/подзаголовок ${headS}/${bs} меньше 1.3 — уменьши подзаголовок`);
+  const need = Math.max(...cards.map((c, i) => 30 + textHeight(stripInline(c.head), headBox, headS) + (c.body.length ? 8 + textHeight(bodies[i], headBox, bs, { lh: 1.2 }) : 0)));
   if (!opts.stretch) ch = Math.min(ch, Math.max(need + 16, ch * 0.45));
   cards.forEach((c, i) => {
     const cx = x + (i % perRow) * (cw + gap), cy = y + Math.floor(i / perRow) * (ch + gap);
@@ -222,12 +242,36 @@ function cardsBlock(sl, x, y, w, h, cards, where, opts = {}) {
 }
 
 function flowBlock(sl, x, y, w, h, flow, where = 'flow') {
-  const n = flow.length, gap = 28, bw = (w - gap * (n - 1)) / n;
-  const size = Math.min(...flow.map(f => fit(stripInline(f.t), bw - 16, h - 16, 24, 14, { bold: true }, where + ' (схема)')));
+  // Бенчмарк (слайды докладчика): подпись узла — ОДНА строка, кегль уменьшается
+  // пропорционально ширине узла. Раньше кегль подбирался только по высоте бокса,
+  // и длинная подпись переезжала на 2–3 строки.
+  const n = flow.length, gap = n >= 4 ? 18 : 28, bw = (w - gap * (n - 1)) / n;
+  const inner = bw - 12, boxH = h - 16, MIN = 11, MAX = 24;
+  const labels = flow.map(f => stripInline(f.t));
+  // Кегль, при котором каждая подпись укладывается в maxLines строк (null — не укладывается).
+  const pick = maxLines => {
+    const sizes = labels.map(t => {
+      const tokenEm = widestTokenEm(t, true);
+      const hi = tokenEm ? Math.min(MAX, Math.floor(inner / tokenEm)) : MAX;
+      if (hi < MIN) return null;
+      for (let s = hi; s >= MIN; s--) if (wrapCount(t, inner, s, { bold: true }) <= maxLines) return s;
+      return null;
+    });
+    return sizes.some(v => v === null) ? null : Math.min(...sizes);
+  };
+  const whereF = `${where} (схема)`;
+  let size = pick(1);
+  if (size === null) {
+    size = pick(2);
+    if (size === null) {
+      warnings.push(`${whereF}: слово шире колонки даже в ${MIN}pt — сократи подпись`);
+      size = MIN;
+    } else warnings.push(`${whereF}: цепочка не помещается в одну строку — кегль уменьшен, максимум 2 строки`);
+  }
   flow.forEach((f, i) => {
     const bx = x + i * (bw + gap), c = f.color ? col(f.color) : null;
     sl.box(bx, y, bw, h, { fill: c ? bgOf(c) : C.panel, line: c || C.border, r: 8 });
-    sl.txt(bx + 8, y, bw - 16, h, inline(f.t, { color: c || C.text }), { size, bold: true, align: 'center', valign: 'middle', color: c || C.text });
+    sl.txt(bx + 6, y, inner, h, inline(f.t, { color: c || C.text }), { size, bold: true, align: 'center', valign: 'middle', color: c || C.text });
     if (i < n - 1) sl.line(bx + bw + 4, y + h / 2, bx + bw + gap - 4, y + h / 2, { color: C.dim, w: 2, arrow: true });
   });
 }

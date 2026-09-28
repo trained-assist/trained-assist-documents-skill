@@ -85,3 +85,51 @@ test('measured widths beat the old «average 0.55» heuristic', () => {
   // разные буквы — разная ширина, а не один средний коэффициент
   assert.ok(lineWidth('Ж', true) > lineWidth('I', true) * 2);
 });
+
+// ---------- бенчмарк типографики (слайды докладчика: иерархия + одна строка в цепочке) ----------
+// Жадный перенос по измеренным ширинам — независимая реализация для проверки.
+function lines(text, w, size, bold = false) {
+  const space = lineWidth(' ', bold) * size;
+  let total = 0;
+  for (const para of String(text).split('\n')) {
+    let n = 1, cur = 0;
+    for (const word of para.split(/\s+/)) {
+      const ww = lineWidth(word, bold) * size;
+      if (cur === 0) cur = ww;
+      else if (cur + space + ww <= w) cur += space + ww;
+      else { n++; cur = ww; }
+    }
+    total += n;
+  }
+  return total;
+}
+
+test('card subtitle is a clear level below its heading (hierarchy ≥ 1.3)', () => {
+  const src = '---\ntitle: T\n---\n## Карточки\n### Владельцы {orange}\nза данные и решения отвечают разные команды\n### Системы {blue}\nHR, Finance, Docs, почта, календарь\n';
+  const items = build(splitSlides(src).map(parseSlide), {})[1].items.filter(i => i.k === 'txt');
+  const text = i => i.runs.map(r => r.t).join('');
+  const head = items.find(i => text(i) === 'Владельцы');
+  const body = items.find(i => text(i).startsWith('за данные'));
+  assert.ok(head && body, 'заголовок и подзаголовок карточки отрисованы');
+  assert.ok(body.o.size <= Math.floor(head.o.size * 0.66),
+    `подзаголовок ${body.o.size}pt должен быть ≤0.66 заголовка ${head.o.size}pt`);
+  assert.ok(head.o.size / body.o.size >= 1.3, 'иерархия заголовок/подзаголовок ≥ 1.3');
+  assert.ok(lines(text(body), body.w, body.o.size) <= 4, 'подзаголовок не переезжает на 5+ строк');
+  assert.deepEqual(checkDeck(src).warnings, [], 'замер иерархии не должен ругаться');
+});
+
+test('flow node labels are rendered on a single line', () => {
+  const labels = flowLabels(flowSlide);
+  assert.equal(labels.length, 5);
+  for (const l of labels) {
+    assert.equal(lines(l.text, l.w, l.size, true), 1,
+      `«${l.text}» при ${l.size}pt занимает больше одной строки в узле ${l.w}pt`);
+  }
+});
+
+test('a blank line ends a card — the next paragraph belongs to the slide', () => {
+  const p = parseSlide('## Слайд\n### Карточка {green}\n- пункт\n\nабзац про слайд\n');
+  assert.equal(p.cards.length, 1);
+  assert.equal(p.cards[0].body.length, 1, 'в карточке только её пункт');
+  assert.ok(p.lead.some(x => x.t.includes('абзац')), 'абзац после пустой строки — текст слайда');
+});
