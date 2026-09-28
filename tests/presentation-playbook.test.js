@@ -58,6 +58,16 @@ test('rewrites must be in the target language', () => {
   assert.ok(!passes('Литературная редактура (английский)', { 'deck/deck.en.md': ru }));
 });
 
+test('rewrite steps go through content_rewrite in document mode, not hermes_run', () => {
+  for (const title of ['Литературная редактура (русский)', 'Литературная редактура (английский)']) {
+    const instr = step(title).instructions;
+    assert.match(instr, /content_rewrite/, `${title}: must call content_rewrite`);
+    assert.match(instr, /режиме document/, `${title}: must use document mode`);
+    assert.match(instr, /preserve_headings/, `${title}: must pin heading preservation`);
+    assert.doesNotMatch(instr, /hermes_run/, `${title}: must not use the GigaChat-prone hermes_run path`);
+  }
+});
+
 test('render step fails while deckgen reports warnings', () => {
   const t = 'Рендер и подгонка (русская версия)';
   assert.equal(step(t).validation.file_exists, 'output/ru/presentation-ru.pdf');
