@@ -111,7 +111,7 @@
       "steps": [
         {
           "title": "Литературная редактура (русский)",
-          "instructions": "Перепиши тексты колоды deck/content.md на хороший литературный русский язык и сохрани в deck/deck.ru.md. Разметку deckgen (разделители ---, теги, ###-карточки, код, Note:) сохранить как есть — меняется только текст. Для редактуры используй hermes_run на Gemini (решение владельца: Gemini лучше всего пишет презентационный текст); модели deepseek-стека для этого шага не использовать.",
+          "instructions": "Перепиши колоду deck/content.md на хороший литературный русский язык инструментом content_rewrite в режиме document: передай весь файл как markdown, language \"ru\", audience и бриф — из deck/ideation.md, preserve_headings: true (заголовки слайдов дословно и в том же порядке — проверяется машинно), style_guard оставь по умолчанию, модель не переопределяй (дефолт google/gemini-2.5-pro; deepseek как основную не задавай). Поле text из ответа сохрани в deck/deck.ru.md. Разметку deckgen (разделители ---, теги, ###-карточки, код, Note:) сохранить как есть — меняется только текст. Если ok:false — не записывай: по violations поправь черновик и повтори вызов. После записи прогони deck_check и исправь слайды из warnings.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "doctor",
@@ -126,7 +126,7 @@
         },
         {
           "title": "Литературная редактура (английский)",
-          "instructions": "Перепиши тексты колоды deck/content.md на хороший литературный английский язык и сохрани в deck/deck.en.md. Разметку deckgen (разделители ---, теги, ###-карточки, код, Note:) сохранить как есть — меняется только текст. Для редактуры используй hermes_run на Gemini (решение владельца: Gemini лучше всего пишет презентационный текст); модели deepseek-стека для этого шага не использовать.",
+          "instructions": "Перепиши колоду deck/content.md на хороший литературный английский язык инструментом content_rewrite в режиме document: передай весь файл как markdown, language \"en\", audience и бриф — из deck/ideation.md, preserve_headings: true (заголовки слайдов дословно и в том же порядке — проверяется машинно), style_guard оставь по умолчанию, модель не переопределяй (дефолт google/gemini-2.5-pro; deepseek как основную не задавай). Поле text из ответа сохрани в deck/deck.en.md. Разметку deckgen (разделители ---, теги, ###-карточки, код, Note:) сохранить как есть — меняется только текст. Если ok:false — не записывай: по violations поправь черновик и повтори вызов. После записи прогони deck_check и исправь слайды из warnings.",
           "execution_kind": "agent",
           "executor_role": "developer",
           "minimum_model_level": "doctor",
