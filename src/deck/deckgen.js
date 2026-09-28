@@ -11,36 +11,67 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { C, setTheme, Slide, highlight, toPptx, toHtml } = require('./engine');
 const { withChromium } = require('../render/chromium');
+const { charEm, lineWidth, widestTokenEm } = require('./text-widths');
 
 const W = 960, H = 540, M = 48, CW = W - 2 * M;
 // Накопитель предупреждений текущего рендера — renderDeck() обнуляет его в начале.
 const warnings = [];
 
 // ---------- оценка размера текста (детерминированно, без рендера) ----------
-// средняя ширина символа в долях кегля: Helvetica/кириллица ≈ 0.55, моно ≈ 0.6
-function textHeight(text, w, size, { mono = false, lh = 1.0 } = {}) {
-  const cw = size * (mono ? 0.6 : 0.55);
-  const perLine = Math.max(1, Math.floor(w / cw));
-  let lines = 0;
-  for (const para of text.split('\n')) {
-    lines += mono ? Math.max(1, Math.ceil(para.length / perLine)) : wrapCount(para, perLine);
-  }
-  return lines * size * 1.2 * lh;
+// Ширины символов — измеренные (см. text-widths.js), а не «средний символ 0.55»:
+// иначе заглавная кириллица/латиница недооценивается и слово рвётся посреди.
+// mono — фиксированная ширина 0.6, там перенос посреди слова ожидаем.
+function textHeight(text, w, size, { mono = false, lh = 1.0, bold = false } = {}) {
+  return wrapCount(text, w, size, { mono, bold }) * size * 1.2 * lh;
 }
-function wrapCount(para, perLine) {
+function wrapCount(text, w, size, { mono = false, bold = false } = {}) {
+  let lines = 0;
+  for (const para of String(text).split('\n')) {
+    if (mono) {
+      const perLine = Math.max(1, Math.floor(w / (size * 0.6)));
+      lines += Math.max(1, Math.ceil(para.length / perLine));
+    } else lines += wrapPara(para, w, size, bold);
+  }
+  return lines;
+}
+// Жадный перенос по словам с измеренными ширинами. Слово шире строки
+// браузер ломает посреди — считаем куски как отдельные строки.
+function wrapPara(para, w, size, bold) {
   if (!para) return 1;
-  let lines = 1, cur = 0;
+  const space = lineWidth(' ', bold) * size;
+  const tokens = [];
   for (const word of para.split(/\s+/)) {
-    const L = word.length;
-    if (cur === 0) cur = L;
-    else if (cur + 1 + L <= perLine) cur += 1 + L;
-    else { lines++; cur = L; }
-    while (cur > perLine) { lines++; cur -= perLine; }
+    const ww = lineWidth(word, bold) * size;
+    if (ww <= w) { tokens.push({ w: ww, br: false }); continue; }
+    let rest = ww;
+    while (rest > 0) {
+      const take = Math.min(rest, w);
+      tokens.push({ w: take, br: tokens.length > 0 && rest < ww });
+      rest -= take;
+    }
+  }
+  let lines = 1, cur = 0;
+  for (const t of tokens) {
+    if (t.br) { lines++; cur = t.w; continue; }
+    if (cur === 0) cur = t.w;
+    else if (cur + space + t.w <= w) cur += space + t.w;
+    else { lines++; cur = t.w; }
   }
   return lines;
 }
 function fit(text, w, h, max, min, opts = {}, where = '') {
-  for (let s = max; s >= min; s--) if (textHeight(text, w, s, opts) <= h) return s;
+  // Кегль не может превышать тот, при котором самое длинное НЕРАЗРЫВАЕМОЕ слово
+  // влезает в колонку — иначе текст перенесётся посреди слова.
+  const tokenEm = opts.mono ? 0 : widestTokenEm(text, opts.bold);
+  let hi = max;
+  if (tokenEm) {
+    const byToken = Math.floor(w / tokenEm);
+    if (byToken < min) {
+      warnings.push(`${where}: слово шире колонки даже в ${min}pt — сократи подпись`);
+      hi = min;
+    } else hi = Math.min(max, byToken);
+  }
+  for (let s = hi; s >= min; s--) if (textHeight(text, w, s, opts) <= h) return s;
   warnings.push(`${where}: текст не влезает даже в ${min}pt — разбей слайд или сократи`);
   return min;
 }
@@ -174,7 +205,7 @@ function cardsBlock(sl, x, y, w, h, cards, where, opts = {}) {
   // один кегль на все карточки — выглядит ровнее
   const bodies = cards.map(c => plain(bulletRuns(c.body)));
   let bs = 22;
-  const headS = Math.min(h < 140 ? 20 : 24, fit(cards.map(c => stripInline(c.head)).sort((a, b) => b.length - a.length)[0], cw - 28, 60, 26, 16, {}, where));
+  const headS = Math.min(h < 140 ? 20 : 24, fit(cards.map(c => stripInline(c.head)).sort((a, b) => b.length - a.length)[0], cw - 28, 60, 26, 16, { bold: true }, where));
   for (; bs > 14; bs--) if (bodies.every(b => textHeight(b, cw - 28, bs, { lh: 1.2 }) <= ch - 28 - headS * 1.3 - 6)) break;
   if (bs === 14 && bodies.some(b => textHeight(b, cw - 28, 14, { lh: 1.2 }) > ch - 28 - headS * 1.3 - 6)) warnings.push(`${where}: в карточках много текста`);
   const need = Math.max(...cards.map((c, i) => 30 + textHeight(stripInline(c.head), cw - 28, headS) + (c.body.length ? 8 + textHeight(bodies[i], cw - 28, bs, { lh: 1.2 }) : 0)));
@@ -190,9 +221,9 @@ function cardsBlock(sl, x, y, w, h, cards, where, opts = {}) {
   });
 }
 
-function flowBlock(sl, x, y, w, h, flow) {
+function flowBlock(sl, x, y, w, h, flow, where = 'flow') {
   const n = flow.length, gap = 28, bw = (w - gap * (n - 1)) / n;
-  const size = Math.min(...flow.map(f => fit(stripInline(f.t), bw - 16, h - 16, 24, 14, {}, 'flow')));
+  const size = Math.min(...flow.map(f => fit(stripInline(f.t), bw - 16, h - 16, 24, 14, { bold: true }, where + ' (схема)')));
   flow.forEach((f, i) => {
     const bx = x + i * (bw + gap), c = f.color ? col(f.color) : null;
     sl.box(bx, y, bw, h, { fill: c ? bgOf(c) : C.panel, line: c || C.border, r: 8 });
@@ -203,7 +234,7 @@ function flowBlock(sl, x, y, w, h, flow) {
 
 function calloutBlock(sl, y, c, where) {
   const color = col(c.color);
-  const size = fit(stripInline(c.text), CW - 40, 44, 22, 15, {}, where + ' (вывод)');
+  const size = fit(stripInline(c.text), CW - 40, 44, 22, 15, { bold: true }, where + ' (вывод)');
   sl.box(M, y, CW, 48, { fill: bgOf(color), line: color, r: 8 });
   sl.txt(M + 20, y, CW - 40, 48, inline(c.text, { color, bold: true }), { size, bold: true, color, valign: 'middle' });
 }
@@ -223,7 +254,7 @@ function build(parsed, meta) {
       const isTitle = idx === 0;
       const lines = [...p.lead.map(x => x.t), ...p.bullets.map(x => x.t)];
       if (p.tag) sl.txt(64, 60, 800, 26, p.tag, { size: 20, bold: true, color: C.accent });
-      const hs = fit(p.h1, 830, 170, isTitle ? 44 : 48, 28, { lh: 1.1 }, where);
+      const hs = fit(p.h1, 830, 170, isTitle ? 44 : 48, 28, { lh: 1.1, bold: true }, where);
       const hh = textHeight(p.h1, 830, hs, { lh: 1.1 });
       const y0 = isTitle ? 120 : Math.max(120, (H - hh - 40 * lines.length) / 2);
       sl.txt(64, y0, 830, hh, p.h1.replace(/\\n/g, '\n'), { size: hs, bold: true, lh: 1.1 });
@@ -244,7 +275,7 @@ function build(parsed, meta) {
       y = 50;
     }
     if (p.title) {
-      const ts = fit(stripInline(p.title), CW, 80, 32, 22, {}, where + ' (заголовок)');
+      const ts = fit(stripInline(p.title), CW, 80, 32, 22, { bold: true }, where + ' (заголовок)');
       const th = textHeight(stripInline(p.title), CW, ts);
       sl.txt(M, y, CW, th, inline(p.title, { color: C.text }), { size: ts, bold: true });
       y += th + 22;
@@ -261,7 +292,7 @@ function build(parsed, meta) {
       const q = p.quote.join('\n');
       const extra = [...p.lead, ...p.bullets];
       const qh = extra.length ? avail() * 0.6 : avail();
-      const qs = fit(stripInline(q), CW - 60, qh, 40, 22, { lh: 1.15 }, where);
+      const qs = fit(stripInline(q), CW - 60, qh, 40, 22, { lh: 1.15, bold: true }, where);
       const realH = Math.min(qh, textHeight(stripInline(q), CW - 60, qs, { lh: 1.15 }));
       const qy = extra.length ? y + 10 : y + (avail() - realH) / 2;
       sl.box(M, qy + 4, 6, realH - 4, { fill: C.accent });
@@ -285,7 +316,7 @@ function build(parsed, meta) {
       const alone = !(p.cards.length || p.codes.length || p.table || p.images.length);
       const fh = Math.min(90, avail() * (alone ? 0.6 : 0.3));
       if (alone) y += Math.max(0, (avail() - fh) / 2 - 20);
-      flowBlock(sl, M, y, CW, fh, p.flow); y += fh + 20;
+      flowBlock(sl, M, y, CW, fh, p.flow, where); y += fh + 20;
     }
 
     if (p.codes.length) {
