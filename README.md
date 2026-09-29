@@ -67,3 +67,7 @@ gate core's deploy uses before it moves this checkout in prod.
   `executor_role` + `minimum_model_level`); prefer deterministic
   `file_exists` / `command_exit_zero` checks over prose validation keys.
 - PRs only; never push to `main` or to someone else's branch.
+
+## Чеклисты и планы — не для репозиториев с pull requestами
+
+Чеклисты (checklist.md и подобные трекеры) и планы НЕ живут в репозитории, где есть pull requestы: общий файл становится гарантированным merge conflict при параллельных PR (дважды за день: trained-assist-agent #1790, #1829), а статус CI/merge и так виден в GitHub. Планы и трекеры статуса -> issue или тело PR. Исключение: репо в статусе draft (нет PR-флоу, одна ветка) — локальный чеклист там допустим.
