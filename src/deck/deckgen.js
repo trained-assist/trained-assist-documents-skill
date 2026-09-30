@@ -121,9 +121,85 @@ const blockOf = where => {
   return m ? (BLOCK_BY_HINT[m[1]] || m[1]) : null;
 };
 
-// Хук линтера рана: L2 (двойной маркер, бюджет выделений) и L4 (интерлиньяж).
-// Наполняется в срезах T4/T5; L1 живёт в txt() и от сюда не зависит.
-function lintRuns() {}
+// L2: маркер, который автор поставил ВНУТРИ пункта. Список рисует свой маркер
+// ('• ', '1. ', '– ') — второй, авторский, даёт «• ✓» и читается как мусор.
+const DOUBLE_MARKER = /^\s*(?:[\u2713\u2714\u2611\u2610\u2717\u2718\u25cf\u25cb\u2022\u2023\u25aa\u25e6\u00b7]|\[[ xX\u2713]\]|[\u2014\u2013])\s+/;
+const stripDoubleMarker = t => t.replace(DOUBLE_MARKER, '');
+const markerOf = t => { const m = DOUBLE_MARKER.exec(t); return m ? m[0].trim() : null; };
+
+// L4: интерлиньяж. engine.js считает line-height как (lh || 1.0) * 1.2 —
+// рубрика требует 1.2–1.6. Сегодня все значения в допуске: класс ловит регресс.
+const LEADING_MIN = 1.2, LEADING_MAX = 1.6;
+
+// Хук линтера рана: L2 (бюджет выделений), L4 (интерлиньяж).
+function lintRuns(runs, o = {}, { where, block } = {}) {
+  const list = typeof runs === 'string' ? [{ t: runs }] : runs;
+  lintEmphasis(list, o, { where, block });
+  lintLeading(o, { where, block });
+}
+
+// L2: бюджет выделений — не больше 2 приёмов на блок (по рубрике).
+// Тонкость, на которой легко словить десятки ложных срабатываний: карточка всегда
+// даёт три цвета оформления (muted тело + accent маркер списка + text жирный), а
+// блок кода — цвета подсветки синтаксиса. Ни то, ни другое приёмом автора не является.
+function lintEmphasis(runs, o, { where, block }) {
+  if (o.mono || !runs.length) return;                    // блок кода — цвета даёт подсветка
+  const base = { color: o.color || C.text, bold: !!o.bold, mono: !!o.mono };
+  // Приём = ОТКЛОНЕНИЕ от базового оформления блока (жирный, другой цвет, код, курсив).
+  // Сам базовый стиль приёмом не считается — иначе «жирный + акцент» давали бы 3.
+  const keys = new Set();
+  for (const r of runs) {
+    if (!r.t || !r.t.trim()) continue;                    // пробельные раны не приём
+    if (r.marker) continue;                              // маркер списка — оформление, не приём
+    const d = [];
+    const color = r.color || o.color || C.text;
+    if (color !== base.color) d.push('цвет:' + color);
+    if (!!(r.bold ?? o.bold) !== base.bold) d.push('жирный');
+    if (!!r.mono !== base.mono) d.push('код');
+    if (r.italic) d.push('курсив');
+    if (d.length) keys.add(d.sort().join('+'));
+  }
+  if (keys.size > 2) {
+    D.pushDefect({ level: 2, code: 'l2_emphasis_budget', slide: curSlide, block,
+      detail: `${keys.size} приёмов выделения в блоке (${[...keys].join(', ')}) — оставь 2` });
+  }
+}
+
+function lintLeading(o, { where, block }) {
+  const ratio = (o.lh || (o.mono ? 1.1 : 1.0)) * 1.2;
+  if (ratio < LEADING_MIN || ratio > LEADING_MAX) {
+    D.pushDefect({ level: 4, code: 'l4_leading', slide: curSlide, block,
+      detail: `интерлиньяж ${ratio.toFixed(2)} вне ${LEADING_MIN}–${LEADING_MAX}` });
+  }
+}
+
+// L2: двойной маркер — парс-этап, до раскладки. Список, тела карточек, lead,
+// плашки вывод и подписи схемы. Авто-чистка — только за флагом: без неё съедается
+// осмысленный «✓» в тексте пункта.
+function lintMarkers(p, where) {
+  const check = (items, kind, get) => {
+    for (const it of items) {
+      const t = get(it);
+      if (typeof t !== 'string') continue;
+      const m = markerOf(t);
+      if (!m) continue;
+      if (opts.autofixMarkers) {                           // починили — не жалуемся
+        const s = stripDoubleMarker(t);
+        if (typeof it.t === 'string') it.t = s;
+        else if (it.text !== undefined) it.text = s;
+        continue;
+      }
+      D.pushDefect({ level: 2, code: 'l2_double_marker', slide: curSlide, block: kind,
+        detail: `маркер «${m}» + маркер списка — убери один` });
+    }
+  };
+  check(p.lead, 'lead', it => it.t);
+  check(p.bullets, 'bullets', it => it.t);
+  check(p.quote, 'quote', it => it);
+  check(p.callouts, 'callout', it => it.text);
+  check(p.flow || [], 'flow', it => it.t);
+  for (const c of p.cards) check(c.body, 'cards', it => it.t);
+}
 
 // Имя блока для отчёта: список с маркерами — 'bullets', абзац — 'lead'.
 const blockName = items => (items.some(i => i.lvl !== undefined || i.num !== undefined) ? 'bullets' : 'lead');
@@ -231,7 +307,7 @@ function bulletRuns(items, base = {}) {
     if (i) runs.push({ t: '\n' });
     if (b.num === undefined && b.lvl === undefined) { runs.push(...inline(b.t, base)); return; }
     const mark = b.num ? `${++n}. ` : (b.lvl ? '    – ' : '• ');
-    runs.push({ t: mark, color: b.lvl ? C.dim : C.accent, bold: true });
+    runs.push({ t: mark, color: b.lvl ? C.dim : C.accent, bold: true, marker: true });
     runs.push(...inline(b.t, { ...base, color: b.lvl ? C.muted : base.color }));
   });
   return runs;
@@ -338,6 +414,7 @@ function build(parsed, meta) {
   parsed.forEach((p, idx) => {
     const no = idx + 1, where = `слайд ${no}`;
     curSlide = no;
+    lintMarkers(p, where);
     const sl = new Slide(); slides.push(sl);
     sl.notes = p.notes;
     sl.box(0, 0, W, 6, { fill: C.accent });
@@ -510,11 +587,15 @@ async function renderDeck({ input, outDir, name, theme, accent, pdf = true, png 
 }
 
 // Только синтаксис/раскладка, без файлов — быстрая проверка «влезает ли текст».
-function checkDeck(src, opts = {}) {
+function checkDeck(src, options = {}) {
   D.reset();
-  opts = opts || {};
+  Object.assign(opts, options || {});   // module-level: build() читает opts.autofixMarkers
   const { meta, body } = parseFront(src);
   meta._dir = process.cwd();
+  // Та же тема и акцент, что и в renderDeck: иначе check считал бы дефекты по цветам
+  // предыдущего рендера, и сверка «оценщик против рендера» в смоуке врала бы.
+  setTheme(meta.theme || 'dark');
+  C.accent = (meta.accent || C.green).replace('#', '');
   const slides = build(splitSlides(body).map(parseSlide), meta);
   return {
     slides: slides.length, warnings: [...D.warnings], defects: [...D.defects],

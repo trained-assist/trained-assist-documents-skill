@@ -193,7 +193,8 @@ test('T5: три приёма выделения в одном блоке → l2
   const d = r.defects.filter(x => x.code === 'l2_emphasis_budget');
   assert.equal(d.length, 1, JSON.stringify(r.defects));
   assert.equal(d[0].level, 2);
-  assert.ok(d[0].measured_pt > 2, 'measured_pt = число приёмов');
+  assert.match(d[0].detail, /^[3-9] приёмов выделения/, d[0].detail);
+  assert.equal(d[0].measured_pt, null, 'measured_pt только для измерений в pt (счётчики — в detail)');
   assert.ok(!r.warnings.some(w => /выделен/.test(w)), 'L2 не идёт в warnings[]');
 });
 
