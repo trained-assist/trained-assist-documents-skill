@@ -2,9 +2,12 @@
 // deckgen: Markdown → .pptx + .html + .pdf без LLM. Раскладка выбирается правилами по содержимому слайда.
 // Формат разметки: src/deck/deckgen-markdown-format.md. Программно: renderDeck() (его зовёт MCP-инструмент deck_render).
 // CLI: node src/deck/deckgen.js deck.md [--out dir] [--name file] [--theme dark|light] [--accent HEX]
-//        [--no-pdf] [--png] [--report file.json] [--strict]
+//        [--no-pdf] [--png] [--report file.json] [--strict] [--autofix-markers] [--smoke]
 //   --report  пишет тот же JSON-отчёт, что и stdout, в файл (каталог создаётся сам)
 //   --strict  код выхода 2, если есть warnings (текст не влез) — для машинной проверки в плейбуке
+//   --autofix-markers  снять двойной маркер в начале пункта (выключен по умолчанию:
+//                      без флага осмысленный «✓» в тексте пункта съедался бы)
+//   --smoke   дополнительно измерить текст в Chromium (наземная правда) → отчёт.smoke
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -675,7 +678,13 @@ async function main() {
   const result = await renderDeck({
     input, outDir: opt('out'), name: opt('name'), theme: opt('theme'), accent: opt('accent'),
     pdf: !args.includes('--no-pdf'), png: args.includes('--png'),
+    autofixMarkers: args.includes('--autofix-markers'),
   });
+  if (args.includes('--smoke')) {
+    // Наземная правда: та же колода, измеренная в браузере, + сверка с оценщиком.
+    const { smokeDeck } = require('./render-smoke');
+    result.smoke = await smokeDeck(input);
+  }
   const report = JSON.stringify(result, null, 2);
   const reportFile = opt('report');
   if (reportFile) { fs.mkdirSync(path.dirname(path.resolve(reportFile)), { recursive: true }); fs.writeFileSync(reportFile, report + '\n'); }
