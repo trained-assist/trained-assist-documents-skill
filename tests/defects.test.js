@@ -225,9 +225,13 @@ test('T5: l4_leading ловит выход интерлиньяжа за 1.2–1
 
 // ---------- T6: L5 близость к футеру ----------
 
-test('T6: блок, прижатый к футеру на слайде с двумя колонками → l5_proximity', () => {
-  // Левая колонка: код на всю высоту. Правая: одна карточка, прижатая к футеру.
-  const src = '## Слайд\n```py\na = 1\n```\n\n### Карточка\n- пункт карточки\n';
+const L5_PRESSED = '## Слайд\n' + Array.from({ length: 4 }, (_, i) => `- пункт ${i}`).join('\n') + '\n\n!!tip Итог\n';
+const L5_OK = '## Слайд\n' + Array.from({ length: 26 }, (_, i) => `- пункт ${i} заметно подлиннее`).join('\n') + '\n\n!!tip Итог\n';
+
+test('T6: нижний блок ближе к футеру, чем к своему блоку → l5_proximity', () => {
+  // Плашка вывода стоит у нижней границы, а текст кончается на 194pt выше — визуально
+  // она читается как подпись футера, а не как вывод. Ровно то, что владелец видит глазами.
+  const src = L5_PRESSED;
   const r = checkDeck(src);
   const d = r.defects.filter(x => x.code === 'l5_proximity');
   assert.ok(d.length > 0, JSON.stringify(r.defects.map(x => x.code + ':' + x.block)));
@@ -243,13 +247,13 @@ test('T6: титул и одноколоночный слайд не флагу�
 });
 
 test('T6: корректная иерархия (нижний блок ближе к своему блоку, чем к футеру) — чисто', () => {
-  const src = '## Слайд\n```py\na = 1\n```\n\n### Одна\n- пункт\n\n### Две\n- пункт\n';
+  const src = L5_OK;
   const r = checkDeck(src);
   assert.deepEqual(r.defects.filter(x => x.code === 'l5_proximity'), []);
 });
 
 test('L5 — advisory: в warnings[] не идёт и гейты не роняет', () => {
-  const src = '## Слайд\n```py\na = 1\n```\n\n### Карточка\n- пункт карточки\n';
+  const src = L5_PRESSED;
   const r = checkDeck(src);
   assert.ok(r.defects.some(x => x.code === 'l5_proximity'));
   assert.ok(!r.warnings.some(w => /L5|l5/.test(w)), JSON.stringify(r.warnings));

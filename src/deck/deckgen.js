@@ -22,7 +22,13 @@ const L1_TOLERANCE = 2;
 // Номер слайда, который сейчас раскладывается: нужен дефектам из txt() и L5.
 let curSlide = 0;
 // Опции текущего прогона разметки (пока — только авто-чистка маркеров за флагом).
+// Обнуляются в beginRun() ВМЕСТЕ с накопителями: иначе флаг одного прогона утекает
+// в следующий (deck_check после deck_check --autofix-markers тихо чистил бы текст).
 let opts = {};
+function beginRun(flags = {}) {
+  D.reset();
+  opts = { autofixMarkers: !!flags.autofixMarkers };
+}
 
 // ---------- оценка размера текста (детерминированно, без рендера) ----------
 // Ширины символов — измеренные (см. text-widths.js), а не «средний символ 0.55»:
@@ -104,13 +110,20 @@ const plain = runs => (typeof runs === 'string' ? runs : runs.map(r => r.t).join
 function txt(sl, where, block, x, y, w, h, runs, o = {}) {
   const size = o.size || 20;
   const lh = o.lh || (o.mono ? 1.1 : 1.0);
-  const over = textHeight(plain(runs), w, size, { mono: !!o.mono, lh, bold: !!o.bold }) - h;
+  const need = textHeight(plain(runs), w, size, { mono: !!o.mono, lh, bold: !!o.bold });
+  const over = need - h;
   if (over > L1_TOLERANCE) {
     D.pushWarning(`L1: ${where} (${block}): текст не влезает на ${Math.round(over)}pt — сократи или разбей слайд`,
       { level: 1, code: 'l1_box_overflow', slide: curSlide, block, detail: 'текст выше бокса', measured_pt: Math.round(over) });
   }
   lintRuns(runs, o, { where, block });
   sl.txt(x, y, w, h, runs, o);
+  // Помечаем блок в списке items: отсюда L5 берёт геометрию раскладки.
+  // textH — реальная высота ТЕКСТА: бокс текстового блока часто больше (avail()),
+  // и мерить близость по боксу значило бы мерить пустоту.
+  const it = sl.items[sl.items.length - 1];
+  it.block = block;
+  it.textH = need;
 }
 
 // Блок по подсказке в `where`: «слайд 3 (заголовок)» → 'title'. Нужен, чтобы
@@ -170,6 +183,53 @@ function lintLeading(o, { where, block }) {
   if (ratio < LEADING_MIN || ratio > LEADING_MAX) {
     D.pushDefect({ level: 4, code: 'l4_leading', slide: curSlide, block,
       detail: `интерлиньяж ${ratio.toFixed(2)} вне ${LEADING_MIN}–${LEADING_MAX}` });
+  }
+}
+
+// L5: теория близости. «Смысловой блок» здесь НЕ догадка, а результат раскладки:
+// колонка = кластер блоков с одинаковым x, опорный блок = ближайший предыдущий блок
+// той же колонки (для первого — заголовок слайда). Флаг ставится, только когда
+// блок в нижних 25% контентной области И ближе к футеру, чем к своему блоку.
+// Титулы/разделители (ветка p.h1) и одноколоночные слайды исключены — там скан
+// давал ложные срабатывания. Advisory: гейты не роняет.
+const L5_FOOTER_Y = 510, L5_BOTTOM = 0.75, L5_GAP_TOL = 8, L5_MAX_H = 1 / 3;
+// «Та же колонка» = горизонтальные интервалы блоков пересекаются хотя бы наполовину
+// более узкого. Сравнение точек x не годится: текст плашки вывода сдвинут на 20pt
+// внутрь своего бокса и в 20pt отличается от блока над ней.
+// Нижняя граница БЛИКА блока: конец текста, а не конец бокса.
+const inkBottom = b => b.y + Math.min(b.h, b.textH || b.h);
+const sameColumn = (a, b) => {
+  const o = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  return o > 0 && o >= 0.5 * Math.min(a.w, b.w);
+};
+const L5_SKIP = new Set(['num', 'footer', 'tag', 'h1', 'title']);
+
+function lintProximity(sl, no, isTitle) {
+  if (isTitle) return;                                     // титул/разделитель: раскладки нет
+  const footerY = (sl.items.find(it => it.k === 'txt' && it.block === 'footer') || { y: L5_FOOTER_Y }).y;
+  const texts = sl.items.filter(it => it.k === 'txt');
+  // Оцениваем только содержательные блоки; шапка/номер/футер в оценку не входят,
+  // но в опорные входят — иначе у первого блока не было бы «своего».
+  const blocks = texts.filter(it => !L5_SKIP.has(it.block || ''));
+  if (blocks.length < 2) return;                            // на слайде ≥2 контентных групп
+  const top = Math.min(...blocks.map(b => b.y));
+  const area = footerY - top;
+  for (const b of [...blocks].sort((p, q) => p.y - q.y)) {
+    // Блок во всю высоту колонки кончается у футера по построению — флагу�� это не про него.
+    if (b.h > L5_MAX_H * area) continue;
+    if (inkBottom(b) < top + L5_BOTTOM * area) continue;     // не в нижних 25%
+    // Опорный блок: ближайший предыдущий блок той же колонки, для первого — заголовок слайда.
+    const anchor = [...blocks].reverse().find(x => x !== b && x.y < b.y && sameColumn(x, b))
+      || texts.filter(x => x !== b && (x.block === 'title' || x.block === 'tag' || x.block === 'h1') && x.y < b.y)
+          .sort((p, q) => q.y - p.y)[0];
+    if (!anchor) return;
+    const gapFooter = footerY - inkBottom(b);
+    const gapAnchor = b.y - inkBottom(anchor);
+    if (gapFooter < gapAnchor - L5_GAP_TOL) {
+      D.pushDefect({ level: 5, code: 'l5_proximity', slide: no, block: b.block || 'block',
+        detail: `ближе к футеру (${Math.round(gapFooter)}pt), чем к блоку «${anchor.block || 'блок'}» (${Math.round(gapAnchor)}pt)`,
+        measured_pt: Math.round(gapAnchor - gapFooter) });
+    }
   }
 }
 
@@ -518,6 +578,7 @@ function build(parsed, meta) {
     } else if (text.length && !p.flow) {
       textBlock(sl, M, y, CW, avail(), text, 28, 16, where);
     }
+    lintProximity(sl, no, !!p.h1);
   });
   return slides;
 }
@@ -561,8 +622,7 @@ async function toPdf(html, file, pngDir) {
  * @returns {Promise<{slides:number, pptx:string, html:string, pdf:string|null, warnings:string[], defects:object[], score:object}>}
  */
 async function renderDeck({ input, outDir, name, theme, accent, pdf = true, png = false, autofixMarkers = false }) {
-  D.reset();
-  opts.autofixMarkers = autofixMarkers;
+  beginRun({ autofixMarkers });
   const { meta, body } = parseFront(fs.readFileSync(input, 'utf8'));
   meta._dir = path.dirname(path.resolve(input));
   setTheme(theme || meta.theme || 'dark');
@@ -588,8 +648,7 @@ async function renderDeck({ input, outDir, name, theme, accent, pdf = true, png 
 
 // Только синтаксис/раскладка, без файлов — быстрая проверка «влезает ли текст».
 function checkDeck(src, options = {}) {
-  D.reset();
-  Object.assign(opts, options || {});   // module-level: build() читает opts.autofixMarkers
+  beginRun(options);
   const { meta, body } = parseFront(src);
   meta._dir = process.cwd();
   // Та же тема и акцент, что и в renderDeck: иначе check считал бы дефекты по цветам
