@@ -17,8 +17,17 @@ jobs:
       - run: npm ci
       - name: Require/load every MCP tool
         run: npm run check
+      # Наземная правда lint'а дефектов (tests/render-smoke.test.js) меряет текст в
+      # Chromium: scrollHeight/clientHeight бокса и попарные прямоугольники строк.
+      # На ubuntu-latest системный Chrome есть; шаг нужен, чтобы прогон в контейнере
+      # без него ПАДАЛ с внятным текстом, а не проходил молча (скип запрещён).
+      - name: Chromium для смоука дефектов
+        run: |
+          command -v google-chrome || command -v chromium || npx playwright-core install chromium
       - name: Unit tests (offline)
         run: npm test
+      - name: Sandbox: lint дефектов колод end-to-end
+        run: npm run sandbox:deck-lint
       # The MCP contract trained-assist-agent's deploy.sh checks before it moves this
       # sibling checkout in prod. (deploy.sh also runs check-skill-schedule.js — a no-op
       # until this repo ships an action-provider-manifest.json; add it here then.)

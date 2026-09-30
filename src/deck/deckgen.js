@@ -523,7 +523,10 @@ function build(parsed, meta) {
       const extra = [...p.lead, ...p.bullets];
       const qh = extra.length ? avail() * 0.6 : avail();
       const qs = fit(stripInline(q), CW - 60, qh, 40, 22, { lh: 1.15, bold: true }, where);
-      const realH = Math.min(qh, textHeight(stripInline(q), CW - 60, qs, { lh: 1.15 }));
+      // bold обязан совпадать с fit() и с рисованием: жирный текст шире, и без него
+      // бокс цитаты считался ниже, чем текст, который в него рисовали (L1 наезжал
+      // на текст под цитатой). Найдено L1-линтером на examples/demo-deck.md.
+      const realH = Math.min(qh, textHeight(stripInline(q), CW - 60, qs, { lh: 1.15, bold: true }));
       const qy = extra.length ? y + 10 : y + (avail() - realH) / 2;
       sl.box(M, qy + 4, 6, realH - 4, { fill: C.accent });
       txt(sl, where, 'quote', M + 30, qy, CW - 60, realH, inline(q, { color: C.text }), { size: qs, bold: true, lh: 1.15 });
@@ -680,4 +683,4 @@ async function main() {
   if (args.includes('--strict') && result.warnings.length) process.exit(2);
 }
 if (require.main === module) main().catch(e => { console.error(e); process.exit(1); });
-module.exports = { parseSlide, splitSlides, build, renderDeck, checkDeck };
+module.exports = { parseSlide, parseFront, splitSlides, build, renderDeck, checkDeck, txt, blockName };
