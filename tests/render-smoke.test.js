@@ -10,6 +10,13 @@ const path = require('path');
 const { smokeDeck } = require('../src/deck/render-smoke');
 const { checkDeck } = require('../src/deck/deckgen');
 
+// Chrome не стартует, если путь до его SingletonSocket длиннее ~108 символов.
+// Playwright кладёт профиль браузера под os.tmpdir(): в слоте агента TMPDIR
+// длинный (в CI — короткий /tmp), и запуск падает «Socket path too long» — тест
+// краснел бы только на VM. Уводим временный корень процесса в короткий каталог;
+// тот же приём, что в scripts/sandbox/deck-defect-lint.sh.
+try { if (os.tmpdir().length > 20) process.env.TMPDIR = fs.mkdtempSync('/tmp/pw-smoke-'); } catch {}
+
 const root = path.resolve(__dirname, '..');
 const demo = path.join(root, 'examples', 'demo-deck.md');
 const work = () => fs.mkdtempSync(path.join(os.tmpdir(), 'smoke-'));
