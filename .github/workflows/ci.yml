@@ -26,7 +26,7 @@ jobs:
           command -v google-chrome || command -v chromium || npx playwright-core install chromium
       - name: Unit tests (offline)
         run: npm test
-      - name: Sandbox: lint дефектов колод end-to-end
+      - name: "Sandbox: lint дефектов колод end-to-end"
         run: npm run sandbox:deck-lint
       # The MCP contract trained-assist-agent's deploy.sh checks before it moves this
       # sibling checkout in prod. (deploy.sh also runs check-skill-schedule.js — a no-op
