@@ -58,21 +58,58 @@ test('скоринг по слайдам: perSlide сортирован по н�
 const codes = (r, lvl) => r.defects.filter(d => !lvl || d.level === lvl).map(d => d.code);
 const byBlock = (r, block, lvl) => r.defects.filter(d => d.block === block && (!lvl || d.level === lvl));
 
-test('L1: переполнение находится на КАЖДОМ типе блока, а не только там, где зовётся fit()', () => {
-  const cases = {
-    lead: '## Слайд\n' + Array.from({ length: 8 }, (_, i) => `Абзац ${i} вводного текста достаточно длинный, чтобы переполнить бокс`).join('\n') + '\n',
-    bullets: '## Слайд\n' + Array.from({ length: 40 }, (_, i) => `- пункт номер ${i} с достаточно длинным текстом, чтобы точно переполнить бокс`).join('\n') + '\n',
-    callout: '## Слайд\n- короткий пункт\n\n!!warn ' + 'очень длинный вывод, который не поместится в плашку высотой 48 пунктов '.repeat(2) + '\n',
-    cards: '## Слай\n### Первая\n' + Array.from({ length: 12 }, (_, i) => `- строка тела карточки номер ${i} довольно длинная`).join('\n') + '\n',
-    flow: '## Слайд\n' + Array.from({ length: 8 }, (_, i) => `узел ${i}`).join(' -> ') + '\n',
-    title: '## ' + 'Очень длинный заголовок слайда, который не влезает в бокс заголовка высотой 80 пунктов '.repeat(2) + '\n',
-  };
-  for (const [block, src] of Object.entries(cases)) {
+// Блоки с боксом, заданным КОНСТАНТОЙ: высота не выведена из текста, поэтому
+// переполнение там возможно всегда — именно их fit() раньше не проверял вовсе.
+const CONST_BOX = {
+  'title':      '# Титул\n' + 'подзаголовок титула не влезает в отведённые ему тридцать пунктов высоты бокса '.repeat(2) + '\n',
+  'code-label': '## Слайд\n```py ' + 'длинная подпись блока кода, которая не влезает в бокс подписи '.repeat(3) + '\na = 1\n```\n',
+  'tag':        '[ИТОГ · ' + 'очень длинное имя раздела, которое не влезает в бокс шапки '.repeat(2) + ']\n## Коротко\n- пункт\n',
+  'callout':    '## Слайд\n- пункт\n\n!!warn ' + 'очень длинный вывод не поместится в плашку высотой сорок восемь пунктов '.repeat(3) + '\n',
+};
+// Блоки, размер которых ВЫВОДИТСЯ из текста: переполнение возможно, когда
+// подбор кегля провалился (min) — этот путь тоже обязан быть в отчёте.
+const FIT_BOX = {
+  'bullets': '## Слайд\n' + Array.from({ length: 40 }, (_, i) => `- пункт номер ${i} с достаточно длинным текстом, чтобы точно переполнить бокс`).join('\n') + '\n',
+  'lead':    '## Слайд\n' + Array.from({ length: 60 }, (_, i) => `абзац ${i} вводного текста достаточно длинный, чтобы переполнить бокс`).join('\n') + '\n',
+  'cards':   '## Слайд\n```py\na = 1\n```\n\n### Карточка\n' + Array.from({ length: 12 }, (_, i) => `- очень длинная строка тела карточки номер ${i}, которая точно не уместится`).join('\n') + '\n',
+};
+
+test('L1: находится на блоках с боксом-константой — их fit() раньше не проверял вовсе', () => {
+  for (const [block, src] of Object.entries(CONST_BOX)) {
     const r = checkDeck(src);
     const l1 = byBlock(r, block, 1);
-    assert.ok(l1.length > 0, `нет L1 для блока ${block}: ${JSON.stringify(r.defects.map(d => d.code + ':' + d.block))}`);
+    assert.ok(l1.length > 0, `нет L1 для ${block}: ${JSON.stringify(r.defects.map(d => d.code + ':' + d.block))}`);
     assert.ok(l1[0].measured_pt > 2, `measured_pt для ${block} = ${l1[0].measured_pt}`);
-    assert.ok(r.warnings.some(w => /^L1: /.test(w)), `нет строки L1 в warnings[] для ${block}: ${JSON.stringify(r.warnings)}`);
+    assert.ok(r.warnings.some(w => /^L1: /.test(w)), `нет строки L1 в warnings[] для ${block}`);
+  }
+});
+
+test('L1: находится там, где подбор кегля провалился (fit вернул min и всё равно нарисовал)', () => {
+  for (const [block, src] of Object.entries(FIT_BOX)) {
+    const r = checkDeck(src);
+    const l1 = byBlock(r, block, 1);
+    assert.ok(l1.length > 0, `нет L1 для ${block}: ${JSON.stringify(r.defects.map(d => d.code + ':' + d.block))}`);
+    assert.ok(l1[0].measured_pt > 2, `measured_pt для ${block} = ${l1[0].measured_pt}`);
+  }
+});
+
+test('L1: у каждого типа блока ровно одна точка проверки — ни один блок не уходит мимо txt()', () => {
+  // Инвариант-ловушка: если новый блок нарисуют через sl.txt() напрямую,
+  // grep ниже перестанет давать 1 (тело обёртки) — и дыра вернётся тихо.
+  const src = require('fs').readFileSync(require.resolve('../src/deck/deckgen'), 'utf8');
+  assert.equal((src.match(/sl\.txt\(/g) || []).length, 1, 'в deckgen должен остаться ровно один вызов sl.txt() — тело txt()');
+  assert.ok(/function txt\(sl, where, block, x, y, w, h, runs/.test(src), 'нужна обёртка txt()');
+});
+
+test('L1: блоки, чей бокс выведен из самого текста, не дают L1 по построению (граница охвата)', () => {
+  // h1/quote/flow/num/footer: высота бокса = измеренная высота текста, переполнение невозможно.
+  // Их дефекты приходят по другим кодам (l1_word_wider, l3_flow_lines), а таблица/картинка
+  // не txt-блоки и в охват L1 не входят (осознанная граница, не забыто).
+  for (const src of ['# Титул\n' + 'строка '.repeat(60) + '\n', '## Слайд\n> ' + 'цитата '.repeat(80) + '\n',
+                     '## Слайд\n' + Array.from({ length: 7 }, (_, i) => 'узел' + i).join(' -> ') + '\n']) {
+    const r = checkDeck(src);
+    assert.deepEqual(r.defects.filter(d => d.level === 1 && ['h1', 'quote', 'flow', 'num', 'footer'].includes(d.block)), [],
+      JSON.stringify(r.defects));
   }
 });
 
