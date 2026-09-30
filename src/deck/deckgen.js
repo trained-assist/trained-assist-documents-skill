@@ -78,7 +78,8 @@ function fit(text, w, h, max, min, opts = {}, where = '') {
   if (tokenEm) {
     const byToken = Math.floor(w / tokenEm);
     if (byToken < min) {
-      if (!quiet) D.pushWarning(`${where}: слово шире колонки даже в ${min}pt — сократи подпись`);
+      if (!quiet) D.pushWarning(`${where}: слово шире колонки даже в ${min}pt — сократи подпись`,
+        { level: 1, code: 'l1_word_wider', slide: curSlide, block: blockOf(where), detail: `слово шире колонки даже в ${min}pt` });
       hi = min;
     } else hi = Math.min(max, byToken);
   }
@@ -86,7 +87,12 @@ function fit(text, w, h, max, min, opts = {}, where = '') {
     const lines = wrapCount(text, w, s, box);
     if (lines * s * 1.2 * (box.lh || 1) <= h && (!maxLines || lines <= maxLines)) return s;
   }
-  if (!quiet) D.pushWarning(`${where}: текст не влезает даже в ${min}pt — разбей слайд или сократи`);
+  if (!quiet) {
+    // Измеренный хвост, а не «не влезает»: дальше по этому числу видно, насколько сокращать.
+    const over = Math.round(wrapCount(text, w, min, box) * min * 1.2 * (box.lh || 1) - h);
+    D.pushWarning(`${where}: текст не влезает даже в ${min}pt — разбей слайд или сократи`,
+      { level: 1, code: 'l1_fit_failed', slide: curSlide, block: blockOf(where), detail: `не влезает даже в ${min}pt`, measured_pt: over > 0 ? over : null });
+  }
   return min;
 }
 const plain = runs => (typeof runs === 'string' ? runs : runs.map(r => r.t).join(''));
@@ -106,6 +112,14 @@ function txt(sl, where, block, x, y, w, h, runs, o = {}) {
   lintRuns(runs, o, { where, block });
   sl.txt(x, y, w, h, runs, o);
 }
+
+// Блок по подсказке в `where`: «слайд 3 (заголовок)» → 'title'. Нужен, чтобы
+// существующие предупреждения fit()/cardsBlock() тоже несли block, а не «слайд N».
+const BLOCK_BY_HINT = { 'заголовок': 'title', 'код': 'code', 'вывод': 'callout', 'схема': 'flow' };
+const blockOf = where => {
+  const m = /\(([^)]+)\)\s*$/.exec(where || '');
+  return m ? (BLOCK_BY_HINT[m[1]] || m[1]) : null;
+};
 
 // Хук линтера рана: L2 (двойной маркер, бюджет выделений) и L4 (интерлиньяж).
 // Наполняется в срезах T4/T5; L1 живёт в txt() и от сюда не зависит.
@@ -256,8 +270,10 @@ function cardsBlock(sl, x, y, w, h, cards, where, opts = {}) {
     && bodies.every(b => textHeight(b, headBox, s, { lh: 1.2 }) <= bodyBox()
         && wrapCount(b, headBox, s) <= BODY_MAX_LINES);
   for (; bs > BODY_MIN && !fits(bs); bs--) {}
-  if (!fits(bs)) D.pushWarning(`${where}: в карточках много текста (больше ${BODY_MAX_LINES} строк) — сократи или раздели слайд`);
-  if (bs > 0 && headS / bs < 1.3) D.pushWarning(`${where}: иерархия заголовок/подзаголовок ${headS}/${bs} меньше 1.3 — уменьши подзаголовок`);
+  if (!fits(bs)) D.pushWarning(`${where}: в карточках много текста (больше ${BODY_MAX_LINES} строк) — сократи или раздели слайд`,
+    { level: 3, code: 'l3_card_body_lines', slide: curSlide, block: 'cards', detail: `больше ${BODY_MAX_LINES} строк текста в теле карточки` });
+  if (bs > 0 && headS / bs < 1.3) D.pushWarning(`${where}: иерархия заголовок/подзаголовок ${headS}/${bs} меньше 1.3 — уменьши подзаголовок`,
+    { level: 4, code: 'l4_hierarchy', slide: curSlide, block: 'cards-head', detail: `иерархия ${headS}/${bs} = ${(headS / bs).toFixed(2)} меньше 1.3` });
   const need = Math.max(...cards.map((c, i) => 30 + textHeight(stripInline(c.head), headBox, headS) + (c.body.length ? 8 + textHeight(bodies[i], headBox, bs, { lh: 1.2 }) : 0)));
   if (!opts.stretch) ch = Math.min(ch, Math.max(need + 16, ch * 0.45));
   cards.forEach((c, i) => {
@@ -294,9 +310,11 @@ function flowBlock(sl, x, y, w, h, flow, where = 'flow') {
   if (size === null) {
     size = pick(2);
     if (size === null) {
-      D.pushWarning(`${whereF}: слово шире колонки даже в ${MIN}pt — сократи подпись`);
+      D.pushWarning(`${whereF}: слово шире колонки даже в ${MIN}pt — сократи подпись`,
+        { level: 1, code: 'l1_word_wider', slide: curSlide, block: 'flow', detail: `подпись узла шире колонки даже в ${MIN}pt` });
       size = MIN;
-    } else D.pushWarning(`${whereF}: цепочка не помещается в одну строку — кегль уменьшен, максимум 2 строки`);
+    } else D.pushWarning(`${whereF}: цепочка не помещается в одну строку — кегль уменьшен, максимум 2 строки`,
+      { level: 3, code: 'l3_flow_lines', slide: curSlide, block: 'flow', detail: 'подписи узлов в 2 строки' });
   }
   flow.forEach((f, i) => {
     const bx = x + i * (bw + gap), c = f.color ? col(f.color) : null;
@@ -412,7 +430,8 @@ function build(parsed, meta) {
       const nrows = p.table.length;
       const size = Math.max(12, Math.min(20, Math.floor(avail() / nrows / 1.9)));
       sl.table(M, y, CW, p.table, { size });
-      if (p.cards.length) D.pushWarning(`${where}: таблица и карточки на одном слайде — карточки пропущены`);
+      if (p.cards.length) D.pushWarning(`${where}: таблица и карточки на одном слайде — карточки пропущены`,
+        { level: 3, code: 'l3_table_cards', slide: curSlide, block: 'table', detail: 'таблица и карточки на одном слайде' });
     } else if (p.images.length) {
       const img = path.resolve(meta._dir, p.images[0]);
       if (p.cards.length) { const iw = CW * 0.55; sl.img(M, y, iw, avail(), img); cardsBlockColumn(sl, M + iw + 16, y, CW - iw - 16, avail(), p.cards, where); }
