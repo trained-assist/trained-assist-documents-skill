@@ -10,9 +10,9 @@
 // VM's own credentials (ADC via the metadata server).
 
 const crypto = require('crypto');
-const fs = require('fs');
 const path = require('path');
 const { tokensRoot } = require('../data-paths');
+const { readCredentialFile, writeCredentialFile } = require('../credential-store');
 
 const GCP_PROJECT = 'trained-assist-gdrive-sa';
 // drive (full) is required: drive.readonly misses externally-shared files.
@@ -42,7 +42,18 @@ async function getAdcToken() {
 function readServiceAccount(profileId) {
   if (!profileId) return null;
   let raw;
-  try { raw = fs.readFileSync(saKeyPath(profileId), 'utf8').trim(); } catch { return null; }
+  // Credential store: legacy plaintext passes through, an encrypted SA key file
+  // is decrypted (trained-assist-agent#1939) — a raw readFileSync would hand
+  // back base64 garbage once CRED_ENCRYPTION_KEY is provisioned. An encrypted
+  // file without the key degrades to "Drive not set up" (never a crash, never
+  // the stub), and says so in the log; a simply absent key file stays silent.
+  try { raw = readCredentialFile(saKeyPath(profileId)).trim(); }
+  catch (e) {
+    if (e && e.code !== 'ENOENT') {
+      console.warn('[google-auth] cannot read the SA key %s: %s', saKeyPath(profileId), e.message);
+    }
+    return null;
+  }
   try {
     const sa = JSON.parse(raw);
     return sa && sa.client_email && sa.private_key ? sa : null;
@@ -50,8 +61,9 @@ function readServiceAccount(profileId) {
 }
 
 function writeServiceAccount(profileId, saJson) {
-  fs.mkdirSync(profileTokenDir(profileId), { recursive: true });
-  fs.writeFileSync(saKeyPath(profileId), JSON.stringify(saJson), { mode: 0o600 });
+  // Encrypted when CRED_ENCRYPTION_KEY is set, plaintext with a warning when not
+  // (it mkdir's the profile dir and keeps mode 0600 itself).
+  writeCredentialFile(saKeyPath(profileId), JSON.stringify(saJson));
 }
 
 function getSaEmail(profileId) {
