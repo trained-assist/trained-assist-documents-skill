@@ -34,6 +34,43 @@ node src/deck/deckgen.js deck.md --out output/ru --name presentation-ru \
 writes the JSON report (creating the directory). `--no-pdf`, `--png`,
 `--theme dark|light`, `--accent HEX` as before.
 
+### Дефекты слайдов в отчёте
+
+Отчёт возвращает три вещи, и они разные по назначению:
+
+| поле | что это | кто читает |
+|---|---|---|
+| `warnings: string[]` | «текст не влез» — уровни **1, 3, 4**. Тип менять нельзя: его читают гейты плейбука, `--strict` и MCP | плейбук, CI |
+| `defects[]` | все дефекты с уровнем 1–5: `{level, code, slide, block, detail, measured_pt, source}` | агент, отчёт |
+| `score` | `{perSlide, deck}`: `score` (100 − штрафы), `maxLevel`, `verdict` (`clean`/`advisory`/`warn`/`critical`), `counts` | агент, отчёт |
+
+Уровни: **1** — переполнение бокса/наложение (критично, роняет гейты), **2** —
+двойной маркер, перебор выделений, **3** — много текста в теле карточки, цепочка
+в 2 строки, **4** — интерлиньяж/иерархия/выравнивание колонок, **5** — блок
+прижат к футеру. Уровни 2–5 — advisory: они **не** попадают в `warnings` и гейты
+не роняют. Штрафы: `{1: 100, 2: 25, 3: 8, 4: 3, 5: 1}`.
+
+Флаги:
+
+| флаг | по умолчанию | что делает |
+|---|---|---|
+| `--autofix-markers` | выключен | снимает двойной маркер в начале пункта (`- ✓ пункт` → `пункт`). Через MCP недоступен: без флага осмысленный «✓» съедался бы |
+| `--smoke` | выключен | дополнительно меряет текст в Chromium и пишет `smoke` в отчёт |
+| `--report` | — | JSON-отчёт (`defects[]`, `score`, `deckgen.version`) |
+
+```bash
+node src/deck/render-smoke.js deck.md --smoke-report smoke.json   # только наземная правда
+```
+
+`render-smoke.js` — отдельный вход: он строит HTML, меряет `scrollHeight/clientHeight`
+и прямоугольники строк в браузере и сверяет с оценщиком. Расхождение попадает в
+отчёт как `l1_estimator_false_positive` / `l1_estimator_false_negative` — это дефект
+инструмента, а не слайда, в `warnings` оно не идёт. Требует Chromium; без него
+падает с внятным текстом, а не скипается.
+
+`deckgen.version` в отчёте нужен, чтобы отличить этот генератор от любой другой
+копии `deckgen.js` на машине.
+
 ## Runtime requirements (VM)
 
 - Node ≥ 20; runtime deps `pptxgenjs`, `playwright-core` — core's `deploy.sh` runs
