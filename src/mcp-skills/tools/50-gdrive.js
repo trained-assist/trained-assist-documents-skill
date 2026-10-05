@@ -884,13 +884,21 @@ module.exports = {
         properties: {
           spreadsheet_id: { type: 'string' },
           sheet_name: { type: 'string', description: 'Exact tab title, including spaces or apostrophes' },
-          range: { type: 'string', default: 'A1:Z1000', description: 'Bounded A1 cell or rectangle without tab prefix; maximum 50000 cells' },
+          range: { type: 'string', description: 'Bounded A1 cell or rectangle without tab prefix; maximum 50000 cells. Omit for up to 26 columns and 1000 rows within the tab grid.' },
         },
       },
-      handler: async ({ spreadsheet_id, sheet_name, range = 'A1:Z1000' } = {}) => {
+      handler: async ({ spreadsheet_id, sheet_name, range } = {}) => {
         validateSheetTarget(spreadsheet_id, sheet_name);
+        const sa = requireSa();
+        if (range === undefined) {
+          const meta = await sheetsApi('GET', `/spreadsheets/${spreadsheet_id}?fields=sheets.properties`, null, sa);
+          const target = meta.sheets?.find(sheet => sheet.properties?.title === sheet_name);
+          if (!target) throw sheetError('SHEETS_TAB_NOT_FOUND', 'Requested tab does not exist');
+          const grid = target.properties.gridProperties || {};
+          range = `A1:${columnName(Math.min(26, grid.columnCount || 26))}${Math.min(1000, grid.rowCount || 1000)}`;
+        }
         validateSheetRange(range);
-        const data = await readSheetValues(spreadsheet_id, sheet_name, range, requireSa());
+        const data = await readSheetValues(spreadsheet_id, sheet_name, range, sa);
         return { spreadsheet_id, sheet_name, range: data.range, values: data.values || [], row_count: data.values?.length || 0 };
       },
     },

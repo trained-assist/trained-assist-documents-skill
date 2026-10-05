@@ -150,6 +150,15 @@ test('private readback handles a single cell and empty ranges', async (context) 
   assert.deepEqual((await tools.gdrive_read_sheet.handler({ spreadsheet_id: 'test-spreadsheet', sheet_name: 'Expenses', range: 'B9:C10' })).values, []);
 });
 
+test('default readback fits a newly created small result grid', async (context) => {
+  const { tools } = loadTools(context);
+  const state = fakeGoogle(context);
+  await tools.gdrive_write_sheet.handler(writeRequest());
+  const result = await tools.gdrive_read_sheet.handler({ spreadsheet_id: 'test-spreadsheet', sheet_name: 'Results' });
+  assert.deepEqual(result.values, writeRequest().rows);
+  assert.match(state.calls[state.calls.length - 1].path, /'Results'!A1:C2$/);
+});
+
 test('operation write commits tab, literal cells and receipt together, then verifies and preserves source', async (context) => {
   const { tools } = loadTools(context);
   const state = fakeGoogle(context);

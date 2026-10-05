@@ -30,7 +30,8 @@ the discovered spreadsheet ID before repeating anything. The fixture prints the
 created ID immediately, before seeding, so a later failure can use `--seed`.
 
 Readback accepts a bounded cell or rectangle such as `A1` or `B2:D20`, without a
-tab prefix. The default is `A1:Z1000`; the maximum is 50,000 cells. Tab titles are
+tab prefix. When omitted, the range covers up to 26 columns and 1000 rows,
+clamped to the actual tab grid; the maximum is 50,000 cells. Tab titles are
 quoted/escaped, including spaces and apostrophes. Values use `UNFORMATTED_VALUE`
 and serial date rendering. Google omits trailing empty cells/rows; an empty
 range returns `values: []`.
