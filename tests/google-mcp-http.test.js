@@ -33,8 +33,11 @@ function runtimeFixture(context) {
   return runtime;
 }
 
-async function hostFixture(context) {
+async function hostFixture(context, approved = false) {
   const runtime = runtimeFixture(context);
+  if (approved) fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify({
+    profile, userTaskId, ownerApproved: true, spreadsheetId: 'approved-sheet',
+  }), { mode: 0o600 });
   mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
   const binding = readBinding(runtime);
   const host = await createHttpHost({ runtime });
@@ -97,6 +100,37 @@ test('HTTP startup refuses unavailable SA readiness without exposing decryption 
   await assert.rejects(createHttpHost({ runtime }), /^Error: DOMAIN_NOT_READY$/);
 });
 
+test('automatic owner approval is canonical and complete before real domain startup', async context => {
+  const runtime = runtimeFixture(context);
+  const authorization = { profile, userTaskId, ownerApproved: true, spreadsheetId: 'approved-sheet', folderId: 'approved-folder' };
+  fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify(authorization), { mode: 0o600 });
+  mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
+  const stdioHost = require('../scripts/sandbox/google-mcp-host.cjs');
+  const originalSpawn = stdioHost.spawnDomain;
+  let spawns = 0;
+  let networkGuardActive = false;
+  let blockedNetworkAttempts = 0;
+  stdioHost.spawnDomain = env => {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runtime, 'owner-target.json'), 'utf8')), { ...authorization, runId });
+    assert.equal(env.GOOGLE_MCP_RUN_ID, runId);
+    spawns++;
+    const child = originalSpawn(env, true);
+    child.on('message', message => {
+      if (message?.networkGuardActive === true) networkGuardActive = true;
+      if (message?.blockedNetworkAttempt === true) blockedNetworkAttempts++;
+    });
+    return child;
+  };
+  let host;
+  try { host = await createHttpHost({ runtime }); } finally { stdioHost.spawnDomain = originalSpawn; }
+  context.after(() => host.close());
+  assert.equal(spawns, 1);
+  assert.equal(host.isReady(), true);
+  assert.equal(networkGuardActive, true);
+  assert.equal(blockedNetworkAttempts, 0);
+  assert.equal(readBinding(runtime).runId, runId);
+});
+
 test('trusted actor registration never changes the hard-pinned credential mount or inherits secrets', context => {
   const runtime = runtimeFixture(context);
   const binding = { profile, credentialProfile, userTaskId, runId, authToken: 'private-transport-token' };
@@ -149,20 +183,39 @@ test('each of the three real handlers refuses missing owner approval without Goo
 });
 
 test('owner approval is also canonical-run and task bound before artifact networking', async context => {
-  const { runtime, post } = await hostFixture(context);
+  const { runtime, post } = await hostFixture(context, true);
   const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
     name: 'gdrive_read_sheet', arguments: { spreadsheet_id: 'different-sheet', sheet_name: 'Expenses' },
   } };
   const target = { profile, userTaskId, runId: `run_${crypto.randomUUID()}`, ownerApproved: true, spreadsheetId: 'approved-sheet' };
   const file = path.join(runtime, 'owner-target.json');
   fs.writeFileSync(file, JSON.stringify(target), { mode: 0o600 });
-  assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
+  assert.equal((await post(request)).status, 401);
   fs.writeFileSync(file, JSON.stringify({ ...target, runId, userTaskId: 'another-task' }));
-  assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
+  assert.equal((await post(request)).status, 401);
   fs.writeFileSync(file, JSON.stringify({ ...target, runId, profile: credentialProfile }));
-  assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
+  assert.equal((await post(request)).status, 401);
   fs.writeFileSync(file, JSON.stringify({ ...target, runId }));
   assert.equal((await post(request)).body.error.message, 'TARGET_NOT_APPROVED');
+});
+
+test('same canonical run and token cannot retarget coordinated approval files on a running host', async context => {
+  const { runtime, post, binding } = await hostFixture(context, true);
+  const bindingFile = path.join(runtime, 'http-binding.json');
+  const before = fs.readFileSync(bindingFile, 'utf8');
+  const changed = { profile, userTaskId, ownerApproved: true, spreadsheetId: 'different-sheet' };
+  fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify(changed));
+  fs.writeFileSync(path.join(runtime, 'owner-target.json'), JSON.stringify({ ...changed, runId }));
+  for (const name of ['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']) {
+    const result = await post({ jsonrpc: '2.0', id: name, method: 'tools/call', params: {
+      name, arguments: { spreadsheet_id: 'different-sheet', folder_id: 'different-folder' },
+    } });
+    assert.equal(result.status, 401);
+    assert.equal(result.body.error, 'AUTH_REQUIRED');
+  }
+  assert.throws(() => readBinding(runtime), /OWNER_TARGET_CONFLICT/);
+  assert.equal(JSON.parse(fs.readFileSync(bindingFile, 'utf8')).authToken, binding.authToken);
+  assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
 });
 
 test('revocation, expiry and scope-file substitution fail closed on every request', async context => {

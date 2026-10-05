@@ -48,6 +48,71 @@ another run's token. Expiry must be future and at most 24 hours away. The host
 is permanently pinned to the tuple present at startup; changing task/run/profile
 requires a new isolated host. There is no remote mint endpoint.
 
+### Trusted pre-tool target provisioning
+
+Before Runner submits the approved task, the parent operator may write
+`owner-authorization.json` into its dedicated private runtime (`0600`, same host
+owner, no symlinks). Its path is fixed; it is not a model argument, caller token,
+remote API or credential source. The existing mint export and operator CLI
+automatically consume this optional file:
+
+```json
+{
+  "profile": "integration-v1",
+  "userTaskId": "REGISTERED_TASK_ID",
+  "ownerApproved": true,
+  "spreadsheetId": "OWNER_APPROVED_TEST_SPREADSHEET_ID",
+  "folderId": "OWNER_APPROVED_SHARED_DRIVE_FOLDER_ID"
+}
+```
+
+These are singleton allowlists matching the existing target guard, not wildcards
+or arrays. At least one target is required; omit `folderId` to refuse creation,
+or omit `spreadsheetId` to refuse read/write. IDs must match `[A-Za-z0-9_-]{1,128}`.
+Only these five keys are accepted. Actor/task must match trusted mint inputs,
+approval must be boolean `true`, and **no run ID is accepted in the template**.
+The Runner-generated canonical `run_<UUID>` is taken unchanged from mint inputs.
+No Google resource, sharing permission or artifact is created by provisioning.
+
+Mint writes the exact `owner-target.json` with that canonical run **before**
+publishing `http-binding.json` or returning to Runner/domain startup. Each file
+is fully written and fsynced in a private `0600` temporary file, then published
+by an exclusive hard link; existing paths are never replaced. Publication is
+atomic per file, not a two-file transaction. Existing binding or owner-target
+paths, including matching targets or symlinks, refuse mint. A crash/failure
+between publications may leave an unbound target; retry fails closed for parent
+inspection, not automatic deletion, repair or scope guessing. Temporary files
+are removed on ordinary success/failure; crashes may leave private temporary
+files for operator cleanup.
+
+Template-backed bindings privately record `ownerAuthorizationRequired:true`.
+This flag is host-derived and never enters engine config or mint's returned
+metadata; it is not a caller readiness assertion. Every new HTTP binding also
+requires `ownerTargetDigest`: mint-time SHA-256 of the canonical JSON array
+`[profile,userTaskId,runId,approved,spreadsheetIdOrNull,folderIdOrNull]`.
+The digest is private binding metadata, not engine wire or a secret/root key.
+`readBinding` verifies current authorization and target against this immutable
+mint-time pin, not merely against each other. Coordinated Sheet/folder substitution
+in both files cannot retarget an unchanged run/token. Startup and restore use the
+same check without writes/remint; the listener anchors its initial digest, and
+the domain tool guard checks its actual target snapshot against the pin again
+before invoking original Google handlers/OAuth. Removing/changing approval or removing/substituting a target
+revokes subsequent authentication/startup. Invalid files, modes, ownership,
+symlinks and metadata over 8192 bytes refuse before use. Missing templates retain
+discovery-only mint without creating a target, with the no-approval state pinned;
+later adding a template/manual target under that token refuses. **Old HTTP bindings
+missing the digest fail closed** even with matching approval files: there is no
+implicit migration, repair or remint. Retargeting requires a separately authorized
+new run/private runtime, never edits to the current approval pair. Standalone
+stdio-only target guard behavior is unchanged.
+
+Runner's task/conversation/generation/engine host-registration pins still apply.
+Keep both private approval files outside model/worker mounts. Provision approval
+after CP supplies the task ID and **before first mint**, never by racing a
+manual canonical-run write against the first tools. Owner input, runtime/SA
+provisioning, TLS exposure and live execution remain parent-owned activation
+steps, not demonstrated by local fixtures.
+
 The resolver reads the opaque token only on its trusted host/private channel
 and injects it through `mcpSecrets`. No SA JSON, Google access token, encryption
 key, owner cloud credentials or runtime path goes to the engine. The bearer is

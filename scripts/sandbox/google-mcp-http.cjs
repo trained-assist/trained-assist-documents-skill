@@ -14,15 +14,86 @@ const safeErrors = new Set(['OWNER_TARGET_REQUIRED', 'TARGET_NOT_APPROVED', 'GOO
   'SHEETS_API_ERROR', 'SHEETS_FOLDER_UNAVAILABLE', 'SHEETS_INVALID_INPUT', 'SHEETS_OPERATION_CONFLICT',
   'SHEETS_OUTCOME_UNKNOWN', 'SHEETS_SOURCE_PROTECTED', 'SHEETS_TAB_NOT_FOUND', 'SHEETS_TARGET_EXISTS']);
 
+function readPrivateJson(file) {
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.size > 8192 ||
+        (process.getuid && stat.uid !== process.getuid())) throw new Error('UNSAFE_RUNTIME_BINDING');
+    return JSON.parse(fs.readFileSync(descriptor, 'utf8'));
+  } finally { fs.closeSync(descriptor); }
+}
+
+function ownerAuthorization(runtime, scope, required = false) {
+  let authorization;
+  try { authorization = readPrivateJson(path.join(runtime, 'owner-authorization.json')); }
+  catch (error) {
+    if (error.code === 'ENOENT' && !required) return null;
+    throw new Error('INVALID_OWNER_AUTHORIZATION');
+  }
+  if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization) ||
+      Object.keys(authorization).some(key => !['profile', 'userTaskId', 'ownerApproved', 'spreadsheetId', 'folderId'].includes(key)) ||
+      authorization.profile !== scope.profile || authorization.userTaskId !== scope.userTaskId || authorization.ownerApproved !== true ||
+      (!authorization.spreadsheetId && !authorization.folderId) ||
+      ['spreadsheetId', 'folderId'].some(key => Object.hasOwn(authorization, key) &&
+        (typeof authorization[key] !== 'string' || !identifier.test(authorization[key])))) throw new Error('INVALID_OWNER_AUTHORIZATION');
+  return authorization;
+}
+
+function exactOwnerTarget(runtime, binding, authorization) {
+  let target;
+  try { target = readPrivateJson(path.join(runtime, 'owner-target.json')); }
+  catch { throw new Error('OWNER_TARGET_CONFLICT'); }
+  if (!target || typeof target !== 'object' || Array.isArray(target) ||
+      Object.keys(target).some(key => !['profile', 'userTaskId', 'runId', 'ownerApproved', 'spreadsheetId', 'folderId'].includes(key)) ||
+      target.profile !== binding.profile || target.userTaskId !== binding.userTaskId || target.runId !== binding.runId ||
+      target.ownerApproved !== true || target.spreadsheetId !== authorization.spreadsheetId ||
+      target.folderId !== authorization.folderId) throw new Error('OWNER_TARGET_CONFLICT');
+}
+
+function ownerTargetDigest(scope, authorization) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    scope.profile, scope.userTaskId, scope.runId, authorization !== null,
+    authorization?.spreadsheetId ?? null, authorization?.folderId ?? null,
+  ])).digest('hex');
+}
+
+function publishPrivateJson(runtime, name, value) {
+  const temporary = path.join(runtime, `.${name}.${crypto.randomUUID()}.tmp`);
+  let descriptor = fs.openSync(temporary, 'wx', 0o600);
+  try {
+    fs.fchmodSync(descriptor, 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(value) + '\n');
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.linkSync(temporary, path.join(runtime, name));
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.unlinkSync(temporary);
+  }
+}
+
 function readBinding(runtime) {
+  privatePath(runtime, true);
   const file = path.join(runtime, 'http-binding.json');
-  privatePath(file);
-  const binding = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const binding = readPrivateJson(file);
   if (!runUuid.test(binding.runId || '') || !identifier.test(binding.userTaskId || '') || binding.profile !== 'integration-v1' ||
       binding.credentialProfile !== 'sandbox-integrator-google' ||
       !/^[A-Za-z0-9_-]{43,128}$/.test(binding.authToken || '') ||
       !Number.isFinite(Date.parse(binding.expiresAt)) || Date.parse(binding.expiresAt) <= Date.now() ||
       Date.parse(binding.expiresAt) > Date.now() + 86400000) throw new Error('INVALID_HTTP_BINDING');
+  if (typeof binding.ownerTargetDigest !== 'string' || !/^[a-f0-9]{64}$/.test(binding.ownerTargetDigest)) throw new Error('INVALID_HTTP_BINDING');
+  if (Object.hasOwn(binding, 'ownerAuthorizationRequired') && binding.ownerAuthorizationRequired !== true) throw new Error('INVALID_HTTP_BINDING');
+  const authorization = ownerAuthorization(runtime, binding, binding.ownerAuthorizationRequired === true);
+  if (binding.ownerTargetDigest !== ownerTargetDigest(binding, authorization)) throw new Error('OWNER_TARGET_CONFLICT');
+  if (authorization) exactOwnerTarget(runtime, binding, authorization);
+  else {
+    try {
+      fs.lstatSync(path.join(runtime, 'owner-target.json'));
+      throw new Error('OWNER_TARGET_CONFLICT');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   return binding;
 }
 
@@ -33,9 +104,22 @@ function mintBinding({ runtime: runtimePath, runId, userTaskId, expectedActorPro
       credentialProfile !== 'sandbox-integrator-google' ||
       !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now() ||
       Date.parse(expiresAt) > Date.now() + 86400000) throw new Error('INVALID_HTTP_BINDING');
-  fs.writeFileSync(path.join(runtime, 'http-binding.json'), JSON.stringify({
-    runId, userTaskId, profile: expectedActorProfile, credentialProfile, expiresAt, authToken: crypto.randomBytes(32).toString('base64url'),
-  }) + '\n', { mode: 0o600, flag: 'wx' });
+  try {
+    fs.lstatSync(path.join(runtime, 'http-binding.json'));
+    throw Object.assign(new Error('EEXIST: HTTP_BINDING_EXISTS'), { code: 'EEXIST' });
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const scope = { runId, userTaskId, profile: expectedActorProfile };
+  const authorization = ownerAuthorization(runtime, scope);
+  try {
+    fs.lstatSync(path.join(runtime, 'owner-target.json'));
+    throw new Error('OWNER_TARGET_CONFLICT');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (authorization) publishPrivateJson(runtime, 'owner-target.json', { ...authorization, runId });
+  publishPrivateJson(runtime, 'http-binding.json', {
+    ...scope, credentialProfile, expiresAt, authToken: crypto.randomBytes(32).toString('base64url'),
+    ownerTargetDigest: ownerTargetDigest(scope, authorization),
+    ...(authorization ? { ownerAuthorizationRequired: true } : {}),
+  });
   return { runId, userTaskId, profile: expectedActorProfile, credentialProfile, expiresAt };
 }
 
@@ -182,6 +266,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
       const binding = readBinding(runtime);
       if (binding.runId !== initial.runId || binding.userTaskId !== initial.userTaskId || binding.profile !== initial.profile ||
           binding.credentialProfile !== initial.credentialProfile ||
+          binding.ownerTargetDigest !== initial.ownerTargetDigest ||
           !equalToken(request.headers.authorization, binding.authToken)) return { status: 401, error: 'AUTH_REQUIRED' };
       if (request.headers['x-mcp-run-id'] !== binding.runId || request.headers['x-mcp-profile'] !== binding.profile ||
           request.headers['x-mcp-user-task-id'] !== binding.userTaskId) return { status: 403, error: 'SCOPE_DENIED' };
@@ -275,7 +360,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
   } };
 }
 
-module.exports = { createHttpHost, readBinding, mintBinding, registeredDomainEnvironment, equalToken, stdioRpc };
+module.exports = { createHttpHost, readBinding, mintBinding, registeredDomainEnvironment, equalToken, stdioRpc, ownerTargetDigest };
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.length !== 4 || args[0] !== '--runtime' || args[2] !== '--port' || !/^\d{1,5}$/.test(args[3]) || Number(args[3]) > 65535) {

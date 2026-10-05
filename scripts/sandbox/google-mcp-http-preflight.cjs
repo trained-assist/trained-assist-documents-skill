@@ -46,6 +46,9 @@ async function main() {
     const { mintBinding, readBinding, createHttpHost } = require('./google-mcp-http.cjs');
     const runId = `run_${crypto.randomUUID()}`;
     const userTaskId = 'preflight-google-task';
+    const authorization = { profile: 'integration-v1', userTaskId, ownerApproved: true,
+      spreadsheetId: 'synthetic-approved-sheet', folderId: 'synthetic-approved-folder' };
+    fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify(authorization), { mode: 0o600 });
     mintBinding({ runtime, runId, userTaskId, expectedActorProfile: 'integration-v1',
       credentialProfile: 'sandbox-integrator-google', expiresAt: new Date(Date.now() + 300000).toISOString() });
     const { authToken } = readBinding(runtime);
@@ -81,11 +84,9 @@ async function main() {
     const listed = await probe('authenticated_tools_list', 200, undefined, 'tools/list', {});
     const toolNames = listed.result.tools.map(tool => tool.name).sort();
     assert.deepEqual(toolNames, ['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']);
-    await probe('missing_owner_target', 200, 'OWNER_TARGET_REQUIRED', 'tools/call', { name: 'gdrive_read_sheet', arguments: {} });
-    fs.writeFileSync(path.join(runtime, 'owner-target.json'), JSON.stringify({
-      profile: 'integration-v1', userTaskId, runId, ownerApproved: true,
-      spreadsheetId: 'synthetic-approved-sheet', folderId: 'synthetic-approved-folder',
-    }), { mode: 0o600 });
+    fs.unlinkSync(path.join(runtime, 'owner-target.json'));
+    await probe('missing_owner_target', 401, 'AUTH_REQUIRED', 'tools/call', { name: 'gdrive_read_sheet', arguments: {} });
+    fs.writeFileSync(path.join(runtime, 'owner-target.json'), JSON.stringify({ ...authorization, runId }), { mode: 0o600 });
     for (const name of toolNames) {
       await probe(`wrong_target:${name}`, 200, 'TARGET_NOT_APPROVED', 'tools/call', {
         name, arguments: { spreadsheet_id: 'synthetic-unapproved-sheet', folder_id: 'synthetic-unapproved-folder', sheet_name: 'Expenses' },
