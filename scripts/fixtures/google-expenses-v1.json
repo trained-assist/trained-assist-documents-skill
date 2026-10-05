@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "source_sheet_name": "Expenses",
+  "category_sheet_name": "Category results",
+  "monthly_sheet_name": "Monthly results",
+  "rows": [
+    ["date", "category", "amount", "merchant"],
+    ["2026-01-05", "Food", 120, "Store A"],
+    ["2026-01-05", "Food", 120, "Store A"],
+    ["2026-01-10", "Transport", 50, "Metro"],
+    ["2026-02-02", "Food", 80, "Store B"],
+    ["2026-02-02", "Food", 80, "Store B"],
+    ["2026-02-15", "Utilities", 200, "Power"],
+    ["2026-03-01", "Transport", 70, "Taxi"],
+    ["2026-03-08", "Food", 30, "Store C"]
+  ],
+  "expected": {
+    "dedupe_rule": "Exact match of all four cells; retain first occurrence",
+    "duplicate_sheet_rows": [3, 6],
+    "duplicates_removed": 2,
+    "unique_expenses": 6,
+    "raw_total": 750,
+    "deduplicated_total": 550,
+    "category_rows": [["category", "total"], ["Food", 230], ["Transport", 120], ["Utilities", 200]],
+    "monthly_rows": [["month", "total"], ["2026-01", 170], ["2026-02", 280], ["2026-03", 100]]
+  }
+}

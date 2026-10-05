@@ -71,6 +71,18 @@ node src/deck/render-smoke.js deck.md --smoke-report smoke.json   # только
 `deckgen.version` в отчёте нужен, чтобы отличить этот генератор от любой другой
 копии `deckgen.js` на машине.
 
+## Google Sheets integration
+
+`gdrive_create_spreadsheet` creates a native spreadsheet in a writable Shared Drive
+folder. `gdrive_read_sheet` reads a private tab/range. `gdrive_write_sheet` accepts
+`operationId` for atomic new-result-tab writes with receipt reconciliation and
+readback; calls without it retain the legacy defaults.
+
+[Contract and sandbox fixture](docs/google-sheets-v1.md) includes known duplicate,
+category and month totals. The fixture prints offline JSON by default. Live use
+requires an explicit isolated service-account binding; module tests do not prove
+Runner MCP transport or credentials/awaiting-task integration.
+
 ## Runtime requirements (VM)
 
 - Node ≥ 20; runtime deps `pptxgenjs`, `playwright-core` — core's `deploy.sh` runs
