@@ -193,7 +193,7 @@ module.exports = {
   isReady: () => !!parseSaJson(USER_ID),
   // These tools need no SA — expose them before gdrive_setup so Claude never
   // reflexively calls gdrive_setup for public files/folders.
-  setupTools: ['gdrive_setup', 'gdrive_status', 'gdrive_public_sheet', 'gdrive_public_folder'],
+  setupTools: ['gdrive_setup', 'gdrive_status', 'gdrive_public_sheet'],
   tools: {
 
     gdrive_setup: {
@@ -339,25 +339,47 @@ module.exports = {
     },
 
     gdrive_list_files: {
-      description: 'List files in a Google Drive folder shared with your Service Account.',
+      description: 'List file names in a Google Drive folder — "что в папке?", "покажи файлы на драйве", "перечисли файлы в этой папке".\n\n' +
+        'Accepts a folder URL (drive.google.com/drive/folders/…) or a bare folder ID; omit `folder` to list everything shared with the service account.\n\n' +
+        'Returns names, types and links only — to read a file use gdrive_read_file, to check whether Drive access works use gdrive_status.',
       inputSchema: {
         type: 'object',
         properties: {
-          folder_id:  { type: 'string', description: 'Folder ID from Drive URL (after /folders/). Empty = list all shared files.' },
+          folder:     { type: 'string', description: 'Drive folder URL or folder ID. Empty = list all files shared with the service account.' },
+          folder_id:  { type: 'string', description: 'Deprecated alias for `folder`.' },
           page_size:  { type: 'number', description: 'Max files (default 30, max 100)' },
           page_token: { type: 'string', description: 'Next page token from previous result' },
         },
       },
-      handler: async ({ folder_id, page_size = 30, page_token } = {}) => {
-        const sa    = requireSa();
+      handler: async ({ folder, folder_id, page_size = 30, page_token } = {}) => {
         const limit = Math.min(page_size || 30, 100);
-        let q       = 'trashed=false';
-        if (folder_id) q += ` and '${folder_id.replace(/'/g, '')}' in parents`;
+
+        // `folder` is canonical; `folder_id` stays accepted so saved calls keep working.
+        const raw = String(folder || folder_id || '').trim();
+        const m = raw.match(/\/folders\/([A-Za-z0-9_-]{20,})/) || (/^[A-Za-z0-9_-]{20,}$/.test(raw) ? raw : null);
+        if (raw && !m) return { error: 'Не смог извлечь folder ID из ввода', input: raw };
+        const fid = m ? (m[1] || m) : null;
+
+        // Drive's files.list needs auth even for a folder shared "anyone with the link", so with no
+        // service account there is nothing to list — say what to do instead of failing.
+        const sa = parseSaJson();
+        if (!sa) {
+          return {
+            folder_id: fid,
+            files: null,
+            note: 'Google Drive не настроен. Вызови gdrive_setup один раз, расшарь нужную папку с SA email — после этого gdrive_list_files покажет её файлы.',
+            folder_url: fid ? `https://drive.google.com/drive/folders/${fid}` : null,
+          };
+        }
+
+        let q = 'trashed=false';
+        if (fid) q += ` and '${fid.replace(/'/g, '')}' in parents`;
         const fields  = 'nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink)';
         let apiPath   = `/drive/v3/files?pageSize=${limit}&orderBy=modifiedTime desc&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}&supportsAllDrives=true&includeItemsFromAllDrives=true`;
         if (page_token) apiPath += `&pageToken=${encodeURIComponent(page_token)}`;
         const data = await driveApi('GET', apiPath, null, sa);
         return {
+          folder_id: fid,
           files: data.files?.map(f => ({
             id: f.id, name: f.name, type: f.mimeType,
             size_kb: f.size ? Math.round(f.size / 1024) : null,
@@ -458,64 +480,12 @@ module.exports = {
       },
     },
 
-    gdrive_public_folder: {
-      description: 'List files in a PUBLIC Google Drive folder (shared "anyone with the link") — NO Service Account needed.\n\n' +
-        'Use this when the user shares a Drive FOLDER link (drive.google.com/drive/folders/…). ' +
-        'Returns a list of files with their IDs and names. After getting the list, use gdrive_public_sheet to read individual xlsx/csv files.',
-      inputSchema: {
-        type: 'object',
-        required: ['folder_url_or_id'],
-        properties: {
-          folder_url_or_id: { type: 'string', description: 'Google Drive folder URL or folder ID' },
-        },
-      },
-      handler: async ({ folder_url_or_id }) => {
-        const urlStr = String(folder_url_or_id);
-        // Extract folder ID from URL like drive.google.com/drive/folders/{id} or drive.google.com/drive/u/0/folders/{id}
-        const fmatch = urlStr.match(/\/folders\/([A-Za-z0-9_-]{20,})/) || urlStr.match(/^([A-Za-z0-9_-]{20,})$/);
-        const folderId = fmatch ? fmatch[1] : null;
-        if (!folderId) return { error: 'Не смог извлечь folder ID из ввода', input: folder_url_or_id };
-
-        // Try listing via SA if available, otherwise explain the limitation.
-        const sa = parseSaJson();
-        if (sa) {
-          try {
-            const q = `'${folderId}' in parents and trashed=false`;
-            const fields = 'files(id,name,mimeType,size,modifiedTime,webViewLink)';
-            const data = await driveApi('GET', `/drive/v3/files?pageSize=50&fields=${encodeURIComponent(fields)}&q=${encodeURIComponent(q)}&supportsAllDrives=true&includeItemsFromAllDrives=true`, null, sa);
-            return {
-              folder_id: folderId,
-              files: data.files?.map(f => ({
-                id: f.id, name: f.name, type: f.mimeType,
-                size_kb: f.size ? Math.round(f.size / 1024) : null,
-                modified: f.modifiedTime, url: f.webViewLink,
-              })) ?? [],
-              count: data.files?.length ?? 0,
-            };
-          } catch (e) {
-            return { error: e.message, folder_id: folderId };
-          }
-        }
-
-        // No SA — Drive API requires auth even for public folders.
-        // Return a helpful message with the folder ID so the user can open it.
-        return {
-          folder_id: folderId,
-          files: null,
-          note: 'Google Drive API требует аутентификацию для листинга папок даже у публичных. ' +
-            'Запусти gdrive_setup один раз и расшарь эту папку с SA email — после этого gdrive_list_files заработает. ' +
-            'Если знаешь ID конкретного файла внутри — можешь попробовать gdrive_public_sheet(file_id).',
-          folder_url: `https://drive.google.com/drive/folders/${folderId}`,
-        };
-      },
-    },
-
     gdrive_read_file: {
       description: 'Read content of a Drive file (requires gdrive_setup / SA access). ' +
         'Supports: Google Docs → plain text, Google Sheets → CSV, Excel .xlsx/.xlsm → parsed CSV (all sheets), plain text/CSV/JSON/HTML/Markdown → as is. ' +
         'IMPORTANT: ALWAYS try this tool for Excel files — never say "I can\'t read Excel". ' +
         'For old .xls format, suggest the user open it in Google Sheets first. ' +
-        'NOTE: for public files without SA, use gdrive_public_sheet (for file URLs) or gdrive_public_folder (for folders).',
+        'NOTE: for public files without SA, use gdrive_public_sheet (for file URLs). For a folder link, run gdrive_setup first — Drive\'s API needs auth even for a public folder — then gdrive_list_files lists it.',
       inputSchema: {
         type: 'object',
         required: ['file_id'],
