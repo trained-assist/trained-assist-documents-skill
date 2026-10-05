@@ -95,6 +95,7 @@ async function getAccessToken(sa) {
   if (cached && Date.now() < cached.expiresAt - 60_000) return cached.token;
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
+    redirect: 'error',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${makeJwt(sa)}`,
     signal: AbortSignal.timeout(10000),

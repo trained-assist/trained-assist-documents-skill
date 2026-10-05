@@ -40,6 +40,7 @@ async function sheetsApi(method, apiPath, body = null, sa = null) {
   const token = await getAccessToken(sa);
   const res = await fetch(`https://sheets.googleapis.com/v4${apiPath}`, {
     method,
+    redirect: 'error',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(15000),
@@ -248,6 +249,7 @@ async function driveApi(method, apiPath, body = null, sa = null) {
   const url   = apiPath.startsWith('http') ? apiPath : `https://www.googleapis.com${apiPath}`;
   const opts  = {
     method,
+    redirect: 'error',
     headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
     signal: AbortSignal.timeout(15000),
   };
