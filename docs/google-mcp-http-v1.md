@@ -62,14 +62,18 @@ automatically consume this optional file:
   "userTaskId": "REGISTERED_TASK_ID",
   "ownerApproved": true,
   "spreadsheetId": "OWNER_APPROVED_TEST_SPREADSHEET_ID",
-  "folderId": "OWNER_APPROVED_SHARED_DRIVE_FOLDER_ID"
+  "folderId": "OWNER_APPROVED_SHARED_DRIVE_FOLDER_ID",
+  "protectedSourceSheetName": "Expenses"
 }
 ```
 
 These are singleton allowlists matching the existing target guard, not wildcards
 or arrays. At least one target is required; omit `folderId` to refuse creation,
 or omit `spreadsheetId` to refuse read/write. IDs must match `[A-Za-z0-9_-]{1,128}`.
-Only these five keys are accepted. Actor/task must match trusted mint inputs,
+Only these six keys are accepted. `protectedSourceSheetName` is optional for
+read-only/discovery scopes but required for canonical scoped writes. It requires
+`spreadsheetId` and a trimmed, nonempty Sheets title of at most 100 characters,
+without control characters or `[]:*?/\`. Actor/task must match trusted mint inputs,
 approval must be boolean `true`, and **no run ID is accepted in the template**.
 The Runner-generated canonical `run_<UUID>` is taken unchanged from mint inputs.
 No Google resource, sharing permission or artifact is created by provisioning.
@@ -89,11 +93,12 @@ Template-backed bindings privately record `ownerAuthorizationRequired:true`.
 This flag is host-derived and never enters engine config or mint's returned
 metadata; it is not a caller readiness assertion. Every new HTTP binding also
 requires `ownerTargetDigest`: mint-time SHA-256 of the canonical JSON array
-`[profile,userTaskId,runId,approved,spreadsheetIdOrNull,folderIdOrNull]`.
+`[profile,userTaskId,runId,approved,spreadsheetIdOrNull,folderIdOrNull,protectedSourceSheetNameOrNull]`.
 The digest is private binding metadata, not engine wire or a secret/root key.
 `readBinding` verifies current authorization and target against this immutable
 mint-time pin, not merely against each other. Coordinated Sheet/folder substitution
-in both files cannot retarget an unchanged run/token. Startup and restore use the
+in both files cannot retarget an unchanged run/token or change its protected source.
+Old digest formats fail closed without migration. Startup and restore use the
 same check without writes/remint; the listener anchors its initial digest, and
 the domain tool guard checks its actual target snapshot against the pin again
 before invoking original Google handlers/OAuth. Removing/changing approval or removing/substituting a target
@@ -194,7 +199,8 @@ task ID and canonical `run_<UUID>` ID:
   "runId": "CANONICAL_RUNNER_ID",
   "ownerApproved": true,
   "folderId": "OWNER_APPROVED_SHARED_DRIVE_FOLDER_ID",
-  "spreadsheetId": "OWNER_APPROVED_TEST_SPREADSHEET_ID"
+  "spreadsheetId": "OWNER_APPROVED_TEST_SPREADSHEET_ID",
+  "protectedSourceSheetName": "Expenses"
 }
 ```
 
@@ -216,7 +222,16 @@ This matches Runner `b2467e0`; Runner refuses a missing readiness hook.
 Timeout/crash fails closed and stops the domain. A started mutation may have
 committed: `MCP_OUTCOME_UNKNOWN`
 requires reconciliation, not blind creation replay. Result writes retain the
-existing operationId reconciliation contract; legacy defaults are unchanged.
+existing operationId reconciliation contract. HTTP and canonical direct-tool
+writes require `operationId` matching `[A-Za-z0-9][A-Za-z0-9._:-]{0,159}` and
+the host-pinned protected source title. Source-title writes are refused before
+OAuth, including case aliases and calls omitting `source_sheet_name`; if supplied,
+that argument must match the trusted source, never override it. Result titles
+must be trimmed valid Sheets titles. Accepted writes use the original atomic
+new-tab operation and readback reconciliation; existing tabs are never cleared
+in this mode, even with `clear_first:true`. Atomicity is per operation, not across
+multiple result tabs. Missing pins refuse writes without silently upgrading an
+existing scope. Trusted fixture seeding and unscoped legacy defaults are unchanged.
 Shutdown waits for actual domain exit and escalates ignored SIGTERM to SIGKILL;
 failure to observe exit fails shutdown rather than reporting successful closure.
 Stopping a host does not revoke Google permissions or delete artifacts. Stop it
