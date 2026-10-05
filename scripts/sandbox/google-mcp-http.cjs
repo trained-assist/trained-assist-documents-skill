@@ -51,6 +51,13 @@ function exactOwnerTarget(runtime, binding, authorization) {
       target.folderId !== authorization.folderId) throw new Error('OWNER_TARGET_CONFLICT');
 }
 
+function ownerTargetDigest(scope, authorization) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    scope.profile, scope.userTaskId, scope.runId, authorization !== null,
+    authorization?.spreadsheetId ?? null, authorization?.folderId ?? null,
+  ])).digest('hex');
+}
+
 function publishPrivateJson(runtime, name, value) {
   const temporary = path.join(runtime, `.${name}.${crypto.randomUUID()}.tmp`);
   let descriptor = fs.openSync(temporary, 'wx', 0o600);
@@ -76,9 +83,17 @@ function readBinding(runtime) {
       !/^[A-Za-z0-9_-]{43,128}$/.test(binding.authToken || '') ||
       !Number.isFinite(Date.parse(binding.expiresAt)) || Date.parse(binding.expiresAt) <= Date.now() ||
       Date.parse(binding.expiresAt) > Date.now() + 86400000) throw new Error('INVALID_HTTP_BINDING');
+  if (typeof binding.ownerTargetDigest !== 'string' || !/^[a-f0-9]{64}$/.test(binding.ownerTargetDigest)) throw new Error('INVALID_HTTP_BINDING');
   if (Object.hasOwn(binding, 'ownerAuthorizationRequired') && binding.ownerAuthorizationRequired !== true) throw new Error('INVALID_HTTP_BINDING');
   const authorization = ownerAuthorization(runtime, binding, binding.ownerAuthorizationRequired === true);
+  if (binding.ownerTargetDigest !== ownerTargetDigest(binding, authorization)) throw new Error('OWNER_TARGET_CONFLICT');
   if (authorization) exactOwnerTarget(runtime, binding, authorization);
+  else {
+    try {
+      fs.lstatSync(path.join(runtime, 'owner-target.json'));
+      throw new Error('OWNER_TARGET_CONFLICT');
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   return binding;
 }
 
@@ -102,6 +117,7 @@ function mintBinding({ runtime: runtimePath, runId, userTaskId, expectedActorPro
   if (authorization) publishPrivateJson(runtime, 'owner-target.json', { ...authorization, runId });
   publishPrivateJson(runtime, 'http-binding.json', {
     ...scope, credentialProfile, expiresAt, authToken: crypto.randomBytes(32).toString('base64url'),
+    ownerTargetDigest: ownerTargetDigest(scope, authorization),
     ...(authorization ? { ownerAuthorizationRequired: true } : {}),
   });
   return { runId, userTaskId, profile: expectedActorProfile, credentialProfile, expiresAt };
@@ -250,6 +266,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
       const binding = readBinding(runtime);
       if (binding.runId !== initial.runId || binding.userTaskId !== initial.userTaskId || binding.profile !== initial.profile ||
           binding.credentialProfile !== initial.credentialProfile ||
+          binding.ownerTargetDigest !== initial.ownerTargetDigest ||
           !equalToken(request.headers.authorization, binding.authToken)) return { status: 401, error: 'AUTH_REQUIRED' };
       if (request.headers['x-mcp-run-id'] !== binding.runId || request.headers['x-mcp-profile'] !== binding.profile ||
           request.headers['x-mcp-user-task-id'] !== binding.userTaskId) return { status: 403, error: 'SCOPE_DENIED' };
@@ -343,7 +360,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
   } };
 }
 
-module.exports = { createHttpHost, readBinding, mintBinding, registeredDomainEnvironment, equalToken, stdioRpc };
+module.exports = { createHttpHost, readBinding, mintBinding, registeredDomainEnvironment, equalToken, stdioRpc, ownerTargetDigest };
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.length !== 4 || args[0] !== '--runtime' || args[2] !== '--port' || !/^\d{1,5}$/.test(args[3]) || Number(args[3]) > 65535) {

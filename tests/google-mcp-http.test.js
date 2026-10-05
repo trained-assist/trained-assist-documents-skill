@@ -33,8 +33,11 @@ function runtimeFixture(context) {
   return runtime;
 }
 
-async function hostFixture(context) {
+async function hostFixture(context, approved = false) {
   const runtime = runtimeFixture(context);
+  if (approved) fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify({
+    profile, userTaskId, ownerApproved: true, spreadsheetId: 'approved-sheet',
+  }), { mode: 0o600 });
   mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
   const binding = readBinding(runtime);
   const host = await createHttpHost({ runtime });
@@ -180,20 +183,39 @@ test('each of the three real handlers refuses missing owner approval without Goo
 });
 
 test('owner approval is also canonical-run and task bound before artifact networking', async context => {
-  const { runtime, post } = await hostFixture(context);
+  const { runtime, post } = await hostFixture(context, true);
   const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
     name: 'gdrive_read_sheet', arguments: { spreadsheet_id: 'different-sheet', sheet_name: 'Expenses' },
   } };
   const target = { profile, userTaskId, runId: `run_${crypto.randomUUID()}`, ownerApproved: true, spreadsheetId: 'approved-sheet' };
   const file = path.join(runtime, 'owner-target.json');
   fs.writeFileSync(file, JSON.stringify(target), { mode: 0o600 });
-  assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
+  assert.equal((await post(request)).status, 401);
   fs.writeFileSync(file, JSON.stringify({ ...target, runId, userTaskId: 'another-task' }));
-  assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
+  assert.equal((await post(request)).status, 401);
   fs.writeFileSync(file, JSON.stringify({ ...target, runId, profile: credentialProfile }));
-  assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
+  assert.equal((await post(request)).status, 401);
   fs.writeFileSync(file, JSON.stringify({ ...target, runId }));
   assert.equal((await post(request)).body.error.message, 'TARGET_NOT_APPROVED');
+});
+
+test('same canonical run and token cannot retarget coordinated approval files on a running host', async context => {
+  const { runtime, post, binding } = await hostFixture(context, true);
+  const bindingFile = path.join(runtime, 'http-binding.json');
+  const before = fs.readFileSync(bindingFile, 'utf8');
+  const changed = { profile, userTaskId, ownerApproved: true, spreadsheetId: 'different-sheet' };
+  fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify(changed));
+  fs.writeFileSync(path.join(runtime, 'owner-target.json'), JSON.stringify({ ...changed, runId }));
+  for (const name of ['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']) {
+    const result = await post({ jsonrpc: '2.0', id: name, method: 'tools/call', params: {
+      name, arguments: { spreadsheet_id: 'different-sheet', folder_id: 'different-folder' },
+    } });
+    assert.equal(result.status, 401);
+    assert.equal(result.body.error, 'AUTH_REQUIRED');
+  }
+  assert.throws(() => readBinding(runtime), /OWNER_TARGET_CONFLICT/);
+  assert.equal(JSON.parse(fs.readFileSync(bindingFile, 'utf8')).authToken, binding.authToken);
+  assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
 });
 
 test('revocation, expiry and scope-file substitution fail closed on every request', async context => {

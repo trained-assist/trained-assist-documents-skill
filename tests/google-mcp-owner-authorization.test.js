@@ -8,6 +8,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { mintBinding, readBinding, createHttpHost } = require('../scripts/sandbox/google-mcp-http.cjs');
 const { approvedTarget } = require('../scripts/sandbox/google-mcp-tools/google');
+const wrapper = require('../scripts/sandbox/google-mcp-tools/google');
+const original = require('../src/mcp-skills/tools/50-gdrive');
 const stdioHost = require('../scripts/sandbox/google-mcp-host.cjs');
 
 function fixture(context) {
@@ -49,12 +51,74 @@ test('trusted approval publishes exact canonical target before binding without r
   const before = fs.readFileSync(bindingFile, 'utf8');
   const binding = readBinding(runtime);
   assert.equal(binding.ownerAuthorizationRequired, true);
+  assert.match(binding.ownerTargetDigest, /^[a-f0-9]{64}$/);
   assert.equal(binding.runId, input.runId);
   assert.equal(binding.authToken.length, 43);
   assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
   assert.throws(() => mintBinding(input), /HTTP_BINDING_EXISTS/);
   assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
   assert.equal(fs.readdirSync(runtime).some(name => name.endsWith('.tmp')), false);
+});
+
+for (const change of [{ spreadsheetId: 'different-sheet' }, { folderId: 'different-folder' }, { spreadsheetId: 'different-sheet', folderId: 'different-folder' }]) {
+  test(`coordinated substitution of ${Object.keys(change).join('/')} refuses before original handlers with the same run and token`, async context => {
+    const { runtime, input, authorization, authorizationFile, targetFile, bindingFile } = fixture(context);
+    writePrivate(authorizationFile, authorization);
+    mintBinding(input);
+    const before = fs.readFileSync(bindingFile, 'utf8');
+    const bound = JSON.parse(before);
+    const changed = { ...authorization, ...change };
+    writePrivate(authorizationFile, changed);
+    writePrivate(targetFile, { ...changed, runId: input.runId });
+    assert.throws(() => readBinding(runtime), /OWNER_TARGET_CONFLICT/);
+    await assert.rejects(createHttpHost({ runtime }), /OWNER_TARGET_CONFLICT/);
+    const values = { GOOGLE_MCP_RUNTIME: runtime, GOOGLE_MCP_PROBE_ONLY: '0', USER_ID: input.credentialProfile,
+      GOOGLE_MCP_ACTOR_PROFILE: input.expectedActorProfile, GOOGLE_MCP_USER_TASK_ID: input.userTaskId, GOOGLE_MCP_RUN_ID: input.runId };
+    const previous = Object.fromEntries(Object.keys(values).map(name => [name, process.env[name]]));
+    Object.assign(process.env, values);
+    let providerCalls = 0;
+    try {
+      for (const name of ['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']) {
+        const handler = original.tools[name].handler;
+        original.tools[name].handler = async () => { providerCalls++; };
+        try {
+          await assert.rejects(wrapper.tools[name].handler({ spreadsheet_id: changed.spreadsheetId, folder_id: changed.folderId }), /OWNER_TARGET_REQUIRED/);
+        } finally { original.tools[name].handler = handler; }
+      }
+    } finally {
+      for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    }
+    assert.equal(providerCalls, 0);
+    assert.equal(JSON.parse(fs.readFileSync(bindingFile, 'utf8')).authToken, bound.authToken);
+    assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
+  });
+}
+
+for (const approved of [false, true]) {
+  test(`old unpinned binding refuses without migration or remint; approval=${approved}`, async context => {
+    const { runtime, input, authorization, authorizationFile, bindingFile } = fixture(context);
+    if (approved) writePrivate(authorizationFile, authorization);
+    mintBinding(input);
+    const legacy = JSON.parse(fs.readFileSync(bindingFile, 'utf8'));
+    delete legacy.ownerTargetDigest;
+    writePrivate(bindingFile, legacy);
+    const before = fs.readFileSync(bindingFile, 'utf8');
+    assert.throws(() => readBinding(runtime), /INVALID_HTTP_BINDING/);
+    await assert.rejects(createHttpHost({ runtime }), /INVALID_HTTP_BINDING/);
+    assert.throws(() => mintBinding(input), /HTTP_BINDING_EXISTS/);
+    assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
+  });
+}
+
+test('discovery-only binding cannot acquire target approval under its existing canonical run/token', context => {
+  const { runtime, input, authorization, authorizationFile, targetFile, bindingFile } = fixture(context);
+  mintBinding(input);
+  const before = fs.readFileSync(bindingFile, 'utf8');
+  writePrivate(targetFile, { ...authorization, runId: input.runId });
+  assert.throws(() => readBinding(runtime), /OWNER_TARGET_CONFLICT/);
+  writePrivate(authorizationFile, authorization);
+  assert.throws(() => readBinding(runtime), /OWNER_TARGET_CONFLICT/);
+  assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
 });
 
 for (const [label, change] of [

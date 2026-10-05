@@ -87,14 +87,24 @@ files for operator cleanup.
 
 Template-backed bindings privately record `ownerAuthorizationRequired:true`.
 This flag is host-derived and never enters engine config or mint's returned
-metadata; it is not a caller readiness assertion. `readBinding` verifies ongoing
-authorization plus the exact existing actor/task/run/target tuple without any
-write or remint. Removing/changing approval or removing/substituting a target
+metadata; it is not a caller readiness assertion. Every new HTTP binding also
+requires `ownerTargetDigest`: mint-time SHA-256 of the canonical JSON array
+`[profile,userTaskId,runId,approved,spreadsheetIdOrNull,folderIdOrNull]`.
+The digest is private binding metadata, not engine wire or a secret/root key.
+`readBinding` verifies current authorization and target against this immutable
+mint-time pin, not merely against each other. Coordinated Sheet/folder substitution
+in both files cannot retarget an unchanged run/token. Startup and restore use the
+same check without writes/remint; the listener anchors its initial digest, and
+the domain tool guard checks its actual target snapshot against the pin again
+before invoking original Google handlers/OAuth. Removing/changing approval or removing/substituting a target
 revokes subsequent authentication/startup. Invalid files, modes, ownership,
 symlinks and metadata over 8192 bytes refuse before use. Missing templates retain
-the legacy discovery-only mint path without creating a target; missing target
-approval still refuses tool calls. Legacy manually approved targets retain the
-existing domain guard. Adding a template to an old binding does not repair it.
+discovery-only mint without creating a target, with the no-approval state pinned;
+later adding a template/manual target under that token refuses. **Old HTTP bindings
+missing the digest fail closed** even with matching approval files: there is no
+implicit migration, repair or remint. Retargeting requires a separately authorized
+new run/private runtime, never edits to the current approval pair. Standalone
+stdio-only target guard behavior is unchanged.
 
 Runner's task/conversation/generation/engine host-registration pins still apply.
 Keep both private approval files outside model/worker mounts. Provision approval
