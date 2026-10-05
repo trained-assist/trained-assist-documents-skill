@@ -90,6 +90,10 @@ verified reconciliation is read-only and preserves identical source metadata.
 
 An exclusive sibling `.lock` prevents concurrent local operators; it is never
 automatically stolen. Owner reconciliation is required before stale-lock removal.
+Publication fsyncs both the completed file and its private parent directory
+after rename/link, before acknowledging the checkpoint/source file. Directory
+sync failure refuses seed launch even if the intent file already exists; there
+is no best-effort fallback on filesystems without directory fsync support.
 Atomic checkpoint writes bind the private runtime reference, exact metadata,
 output path, fixed operation ID and fixture hash. This is not a Google lock
 against other editors: keep the dedicated Sheet isolated and serialize operators.

@@ -73,6 +73,12 @@ function writeJson(file, value, exclusive = false) {
     fs.fsyncSync(descriptor);
     if (exclusive) fs.linkSync(temporary, file);
     else fs.renameSync(temporary, file);
+    const directory = fs.openSync(path.dirname(file), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      const stat = fs.fstatSync(directory);
+      assert.ok(stat.isDirectory() && (stat.mode & 0o777) === 0o700 && (!process.getuid || stat.uid === process.getuid()));
+      fs.fsyncSync(directory);
+    } finally { fs.closeSync(directory); }
   } finally {
     fs.closeSync(descriptor);
     try { fs.unlinkSync(temporary); } catch {}
