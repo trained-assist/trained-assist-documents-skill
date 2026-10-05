@@ -115,7 +115,8 @@ test('trusted actor registration never changes the hard-pinned credential mount 
 });
 
 test('remote JSON handshake negotiates HTTP protocol and exposes exactly three tools', async context => {
-  const { post } = await hostFixture(context);
+  const { post, host } = await hostFixture(context);
+  assert.equal(host.isReady(), true);
   const init = await post({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } });
   assert.equal(init.status, 200);
   assert.equal(init.body.result.protocolVersion, '2025-11-25');
@@ -199,7 +200,9 @@ test('stdio timeout kills the domain and never retries an ambiguous mutation', a
   let kills = 0;
   child.kill = () => { kills++; queueMicrotask(() => child.emit('close')); };
   const rpc = stdioRpc(child, 20);
+  assert.equal(rpc.isReady(), true);
   await assert.rejects(rpc.call('tools/call', { name: 'gdrive_write_sheet' }), /MCP_OUTCOME_UNKNOWN/);
+  assert.equal(rpc.isReady(), false);
   await assert.rejects(rpc.call('tools/call', {}), /MCP_UNAVAILABLE/);
   assert.equal(kills, 1);
   await rpc.close();
@@ -244,4 +247,111 @@ test('shutdown awaits actual exit and escalates an ignored SIGTERM without repla
   await pending;
   await rpc.close();
   assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+});
+
+async function controlledHostFixture(context) {
+  const runtime = runtimeFixture(context);
+  mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile,
+    expiresAt: new Date(Date.now() + 3600000).toISOString() });
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const signals = [];
+  child.kill = signal => {
+    child.killed = true;
+    signals.push(signal);
+    queueMicrotask(() => child.emit('close'));
+  };
+  let calls = 0;
+  child.stdin.on('data', chunk => {
+    const request = JSON.parse(chunk.toString());
+    calls++;
+    if (calls === 1) queueMicrotask(() => child.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id,
+      result: { tools: ['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet'].map(name => ({ name })) },
+    }) + '\n'));
+  });
+  const spawn = context.mock.method(require('../scripts/sandbox/google-mcp-host.cjs'), 'spawnDomain', () => child);
+  const host = await createHttpHost({ runtime });
+  context.after(() => host.close());
+  const url = `http://127.0.0.1:${host.server.address().port}/mcp`;
+  const binding = readBinding(runtime);
+  const headers = { Authorization: `Bearer ${binding.authToken}`, 'X-MCP-Run-Id': runId,
+    'X-MCP-User-Task-Id': userTaskId, 'X-MCP-Profile': profile,
+    Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
+  return { child, host, url, headers, spawn, signals, calls: () => calls };
+}
+
+for (const failure of ['exit', 'error', 'stdin_error', 'stdout_end', 'malformed_rpc']) {
+  test(`host readiness and listener fail closed immediately on ${failure} without restart`, async context => {
+    const fixture = await controlledHostFixture(context);
+    assert.equal(fixture.host.isReady(), true);
+    if (failure === 'exit') fixture.child.emit('exit', 1);
+    else if (failure === 'error') fixture.child.emit('error', new Error('synthetic-private-detail'));
+    else if (failure === 'stdin_error') fixture.child.stdin.emit('error', new Error('synthetic-private-detail'));
+    else if (failure === 'stdout_end') fixture.child.stdout.emit('end');
+    else fixture.child.stdout.write('synthetic-private-malformed-rpc\n');
+    assert.equal(fixture.host.isReady(), false);
+    assert.equal(fixture.host.server.listening, false);
+    await assert.rejects(fetch(fixture.url, { method: 'POST', headers: fixture.headers,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }) }));
+    await fixture.host.close();
+    await fixture.host.close();
+    assert.equal(fixture.spawn.mock.callCount(), 1);
+    assert.equal(fixture.calls(), 1);
+    assert.deepEqual(fixture.signals, ['SIGTERM']);
+  });
+}
+
+test('RPC timeout tears down listener and pending HTTP connection without retry', async context => {
+  const setTimeoutOriginal = setTimeout;
+  context.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) =>
+    setTimeoutOriginal(callback, delay === 30000 ? 20 : delay, ...args));
+  const fixture = await controlledHostFixture(context);
+  await assert.rejects(fetch(fixture.url, { method: 'POST', headers: fixture.headers,
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) }));
+  assert.equal(fixture.host.isReady(), false);
+  assert.equal(fixture.host.server.listening, false);
+  await fixture.host.close();
+  assert.equal(fixture.spawn.mock.callCount(), 1);
+  assert.equal(fixture.calls(), 2);
+  assert.deepEqual(fixture.signals, ['SIGTERM']);
+});
+
+test('explicit host shutdown makes readiness false and remains idempotent', async context => {
+  const { host } = await hostFixture(context);
+  assert.equal(host.isReady(), true);
+  await host.close();
+  assert.equal(host.isReady(), false);
+  assert.equal(host.server.listening, false);
+  await host.close();
+});
+
+test('actual guarded domain crash closes the real listener with no provider calls or respawn', async context => {
+  const stdioHost = require('../scripts/sandbox/google-mcp-host.cjs');
+  const originalSpawn = stdioHost.spawnDomain;
+  let child;
+  let guardActive = false;
+  let networkAttempts = 0;
+  const spawn = context.mock.method(stdioHost, 'spawnDomain', env => {
+    child = originalSpawn(env, true);
+    child.on('message', message => {
+      if (message?.networkGuardActive) guardActive = true;
+      if (message?.blockedNetworkAttempt) networkAttempts++;
+    });
+    return child;
+  });
+  const { host, url, headers } = await hostFixture(context);
+  assert.equal(host.isReady(), true);
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  child.kill('SIGKILL');
+  await exited;
+  assert.equal(host.isReady(), false);
+  assert.equal(host.server.listening, false);
+  await assert.rejects(fetch(url, { method: 'POST', headers,
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) }));
+  await host.close();
+  assert.equal(spawn.mock.callCount(), 1);
+  assert.equal(guardActive, true);
+  assert.equal(networkAttempts, 0);
 });

@@ -4,7 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { privatePath, childEnvironment, spawnDomain } = require('./google-mcp-host.cjs');
+const stdioHost = require('./google-mcp-host.cjs');
+const { privatePath, childEnvironment } = stdioHost;
 const versions = new Set(['2025-03-26', '2025-06-18', '2025-11-25']);
 const tools = new Set(['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']);
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
@@ -55,7 +56,7 @@ function equalToken(received, expected) {
     crypto.createHash('sha256').update(`Bearer ${expected}`).digest());
 }
 
-function stdioRpc(child, timeoutMs = 30000, stopGraceMs = 250) {
+function stdioRpc(child, timeoutMs = 30000, stopGraceMs = 250, onFailure = () => {}) {
   const pending = new Map();
   let sequence = 0;
   let buffer = '';
@@ -63,7 +64,9 @@ function stdioRpc(child, timeoutMs = 30000, stopGraceMs = 250) {
   let exited = false;
   let termination;
   function fail() {
+    const firstFailure = !failed;
     failed = true;
+    if (firstFailure) onFailure();
     for (const entry of pending.values()) {
       clearTimeout(entry.timer);
       entry.reject(new Error('MCP_OUTCOME_UNKNOWN'));
@@ -89,9 +92,15 @@ function stdioRpc(child, timeoutMs = 30000, stopGraceMs = 250) {
     return termination;
   }
   child.stderr.on('data', () => {});
+  child.stderr.on('error', fail);
   child.stdin.on('error', fail);
+  child.stdin.on('close', fail);
   child.on('error', fail);
+  child.on('exit', fail);
   child.on('close', () => { exited = true; fail(); });
+  child.stdout.on('error', fail);
+  child.stdout.on('end', fail);
+  child.stdout.on('close', fail);
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', chunk => {
     buffer += chunk;
@@ -111,6 +120,8 @@ function stdioRpc(child, timeoutMs = 30000, stopGraceMs = 250) {
     }
   });
   return {
+    isReady: () => !failed && !exited && !child.killed && child.exitCode == null && child.signalCode == null &&
+      !child.stdin.destroyed && !child.stdout.destroyed,
     call(method, params) {
       if (failed) return Promise.reject(new Error('MCP_UNAVAILABLE'));
       if (pending.size >= 8) return Promise.reject(new Error('MCP_BUSY'));
@@ -148,7 +159,19 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
   const runtime = fs.realpathSync(runtimePath);
   const initial = readBinding(runtime);
   const env = registeredDomainEnvironment(runtime, initial);
-  const rpc = stdioRpc(spawnDomain(env));
+  let server;
+  let listenerClosed;
+  let rejectListening;
+  function closeListener() {
+    if (!server) return Promise.resolve();
+    if (!listenerClosed) listenerClosed = new Promise(resolve => server.close(resolve));
+    server.closeAllConnections();
+    return listenerClosed;
+  }
+  const rpc = stdioRpc(stdioHost.spawnDomain(env), 30000, 250, () => {
+    closeListener();
+    if (rejectListening) rejectListening(new Error('DOMAIN_NOT_READY'));
+  });
   try {
     const catalog = await rpc.call('tools/list', {});
     const names = catalog.result?.tools?.map(tool => tool.name).sort();
@@ -165,8 +188,9 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
       return null;
     } catch { return { status: 401, error: 'AUTH_REQUIRED' }; }
   }
-  const server = http.createServer(async (request, response) => {
+  server = http.createServer(async (request, response) => {
     try {
+      if (!rpc.isReady()) return jsonResponse(response, 503, { error: 'MCP_UNAVAILABLE' });
       const initialRefusal = authorize(request);
       if (initialRefusal) return jsonResponse(response, initialRefusal.status, { error: initialRefusal.error });
       const hosts = [`127.0.0.1:${server.address().port}`, `localhost:${server.address().port}`];
@@ -191,6 +215,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
       catch (error) { return jsonResponse(response, error.message === 'BODY_TOO_LARGE' ? 413 : 400, { error: 'INVALID_MESSAGE' }); }
       const dispatchRefusal = authorize(request);
       if (dispatchRefusal) return jsonResponse(response, dispatchRefusal.status, { error: dispatchRefusal.error });
+      if (!rpc.isReady()) return jsonResponse(response, 503, { error: 'MCP_UNAVAILABLE' });
       if (!message || Array.isArray(message) || message.jsonrpc !== '2.0' || typeof message.method !== 'string' ||
           (message.id !== undefined && (typeof message.id !== 'number' && typeof message.id !== 'string')) ||
           (typeof message.id === 'number' && !Number.isFinite(message.id)) ||
@@ -227,17 +252,26 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
   server.requestTimeout = 10000;
   server.headersTimeout = 10000;
   server.maxConnections = 32;
+  server.on('error', () => { rpc.close().catch(() => {}); });
+  server.on('listening', () => {
+    if (!rpc.isReady()) {
+      server.close();
+      server.closeAllConnections();
+    }
+  });
   try {
+    if (!rpc.isReady()) throw new Error('DOMAIN_NOT_READY');
     await new Promise((resolve, reject) => {
+      rejectListening = reject;
       server.once('error', reject);
       server.listen(port, '127.0.0.1', resolve);
     });
-  } catch { await rpc.close(); throw new Error('HTTP_START_FAILED'); }
-  return { server, close: async () => {
+    if (!rpc.isReady() || !server.listening) throw new Error('DOMAIN_NOT_READY');
+  } catch { await Promise.all([closeListener(), rpc.close()]); throw new Error('HTTP_START_FAILED'); }
+  finally { rejectListening = undefined; }
+  return { server, isReady: () => server.listening && rpc.isReady(), close: async () => {
     const stopped = rpc.close();
-    const closed = new Promise(resolve => server.close(resolve));
-    server.closeAllConnections();
-    await Promise.all([closed, stopped]);
+    await Promise.all([closeListener(), stopped]);
   } };
 }
 

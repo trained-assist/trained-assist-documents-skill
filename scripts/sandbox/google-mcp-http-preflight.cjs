@@ -50,6 +50,7 @@ async function main() {
       credentialProfile: 'sandbox-integrator-google', expiresAt: new Date(Date.now() + 300000).toISOString() });
     const { authToken } = readBinding(runtime);
     host = await createHttpHost({ runtime });
+    assert.equal(host.isReady(), true);
     const url = `http://127.0.0.1:${host.server.address().port}/mcp`;
     const headers = { Authorization: `Bearer ${authToken}`, 'X-MCP-Profile': 'integration-v1',
       'X-MCP-Run-Id': runId, 'X-MCP-User-Task-Id': userTaskId,
@@ -91,6 +92,8 @@ async function main() {
       });
     }
     await host.close();
+    assert.equal(host.isReady(), false);
+    assert.equal(host.server.listening, false);
     host = null;
     assert.equal(domainExited, true);
     assert.equal(networkGuardActive, true);

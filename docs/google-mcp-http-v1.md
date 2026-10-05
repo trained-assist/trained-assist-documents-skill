@@ -138,8 +138,18 @@ artifact or token request. Approval is read for every tool call; only exact targ
 IDs pass. Creation does not automatically approve the new spreadsheet ID. A
 changed transport/task/run does not inherit another run's owner approval.
 
-Timeout/crash fails closed, stops the domain and never retries/restarts it
-automatically. A started mutation may have committed: `MCP_OUTCOME_UNKNOWN`
+The exported `createHttpHost` returns `{server, isReady, close}` for Runner's
+managed-host contract. `isReady()` synchronously requires both a listening HTTP
+socket and a live, healthy stdio child/RPC; a socket alone is not readiness.
+Child exit/error, broken stdio, malformed RPC and RPC timeout permanently invalidate
+readiness and immediately close the HTTP listener and existing connections.
+Pending HTTP requests may therefore receive a connection error rather than a JSON
+error. `close()` is idempotent and still waits for actual child exit. A dead host
+never returns to ready and never retries/restarts the domain automatically.
+This matches Runner `b2467e0`; Runner refuses a missing readiness hook.
+
+Timeout/crash fails closed and stops the domain. A started mutation may have
+committed: `MCP_OUTCOME_UNKNOWN`
 requires reconciliation, not blind creation replay. Result writes retain the
 existing operationId reconciliation contract; legacy defaults are unchanged.
 Shutdown waits for actual domain exit and escalates ignored SIGTERM to SIGKILL;
