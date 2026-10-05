@@ -156,7 +156,7 @@ async function writeSheetOperation({ spreadsheet_id, sheet_name, rows, operation
   try {
     await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}:batchUpdate`, {
       requests: [
-        { addSheet: { properties: { sheetId, title: sheet_name, gridProperties: { rowCount: Math.max(1000, values.length), columnCount: Math.max(26, values[0].length) } } } },
+        { addSheet: { properties: { sheetId, title: sheet_name, gridProperties: { rowCount: values.length, columnCount: values[0].length } } } },
         { updateCells: {
           start: { sheetId, rowIndex: 0, columnIndex: 0 },
           rows: values.map(row => ({ values: row.map(value => ({ userEnteredValue: {

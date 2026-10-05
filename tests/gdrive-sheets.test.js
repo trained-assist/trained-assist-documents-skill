@@ -158,6 +158,7 @@ test('operation write commits tab, literal cells and receipt together, then veri
   assert.equal(result.deduplicated, false);
   assert.equal(mutations(state).length, 1);
   assert.equal(mutations(state)[0].body.requests.length, 3);
+  assert.deepEqual(mutations(state)[0].body.requests[0].addSheet.properties.gridProperties, { rowCount: 2, columnCount: 3 });
   assert.deepEqual(state.sheets[0].values, [['source', 100]]);
   assert.deepEqual(state.sheets[1].values, [['=literal', '', true], ['Food', 125, '']]);
   assert.doesNotMatch(JSON.stringify(state.sheets[1].developerMetadata), /task-140:category-result/);
