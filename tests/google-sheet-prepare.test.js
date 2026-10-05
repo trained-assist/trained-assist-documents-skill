@@ -85,6 +85,61 @@ test('preflight is read-only, preserves blank baseline gid/title, and writes no 
   assert.equal(fs.statSync(data.checkpoint).mode & 0o777, 0o600);
 });
 
+test('directory sync failure during initial checkpoint refuses provider work even when checkpoint exists', context => {
+  const data = operator(context);
+  const fsyncSync = fs.fsyncSync;
+  context.mock.method(fs, 'fsyncSync', descriptor => {
+    if (fs.fstatSync(descriptor).isDirectory()) throw new Error('private directory sync sentinel');
+    return fsyncSync(descriptor);
+  });
+  const result = main(data.args('preflight'), data.dependencies);
+  assert.equal(result.passed, false);
+  assert.ok(fs.existsSync(data.checkpoint));
+  assert.equal(data.state.calls.length, 0);
+  assert.ok(!JSON.stringify(result.report).includes('private directory sync sentinel'));
+});
+
+test('directory sync failure after seed intent publication refuses mutation even when checkpoint exists', context => {
+  const data = operator(context);
+  assert.equal(main(data.args('preflight'), data.dependencies).passed, true);
+  const fsyncSync = fs.fsyncSync;
+  context.mock.method(fs, 'fsyncSync', descriptor => {
+    if (fs.fstatSync(descriptor).isDirectory()) throw new Error('private intent sync sentinel');
+    return fsyncSync(descriptor);
+  });
+  const result = main(data.args('seed'), data.dependencies);
+  assert.equal(result.passed, false);
+  const durable = JSON.parse(fs.readFileSync(data.checkpoint, 'utf8'));
+  assert.equal(durable.phase, 'seed_attempted');
+  assert.equal(data.state.calls.filter(call => call === 'seed').length, 0);
+  assert.equal(fs.existsSync(data.sourceOut), false);
+  assert.ok(!JSON.stringify(result.report).includes('private intent sync sentinel'));
+});
+
+test('private directory sync follows publication and completes before seed launch and source acknowledgment', context => {
+  const data = operator(context);
+  const synced = [];
+  const fsyncSync = fs.fsyncSync;
+  context.mock.method(fs, 'fsyncSync', descriptor => {
+    const stat = fs.fstatSync(descriptor);
+    if (stat.isDirectory()) {
+      assert.equal(stat.mode & 0o777, 0o700);
+      assert.equal(stat.uid, process.getuid());
+      synced.push({ phase: JSON.parse(fs.readFileSync(data.checkpoint, 'utf8')).phase, sourcePublished: fs.existsSync(data.sourceOut) });
+    }
+    return fsyncSync(descriptor);
+  });
+  const execFileSync = data.dependencies.execFileSync;
+  data.dependencies.execFileSync = (executable, args, options) => {
+    if (args[1] === 'seed') assert.equal(synced.at(-1).phase, 'seed_attempted');
+    return execFileSync(executable, args, options);
+  };
+  assert.equal(main(data.args('preflight'), data.dependencies).passed, true);
+  assert.equal(main(data.args('seed'), data.dependencies).passed, true);
+  assert.ok(synced.some(entry => entry.sourcePublished && entry.phase === 'seed_attempted'));
+  assert.equal(synced.at(-1).phase, 'seed_verified');
+});
+
 test('seed requires checkpoint, refreshes baseline, captures child output and emits only actual source metadata', context => {
   const data = operator(context);
   assert.equal(main(data.args('seed'), data.dependencies).passed, false);
