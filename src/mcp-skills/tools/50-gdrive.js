@@ -249,6 +249,7 @@ async function driveApi(method, apiPath, body = null, sa = null) {
   const url   = apiPath.startsWith('http') ? apiPath : `https://www.googleapis.com${apiPath}`;
   const opts  = {
     method,
+    redirect: 'error',
     headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' },
     signal: AbortSignal.timeout(15000),
   };

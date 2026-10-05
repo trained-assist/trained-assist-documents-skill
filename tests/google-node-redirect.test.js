@@ -21,7 +21,7 @@ async function redirectFixture(context, status) {
     } else {
       state.forwarded.push(captured);
       response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ access_token: 'synthetic-forwarded-token', values: [] }));
+      response.end(JSON.stringify({ access_token: 'synthetic-forwarded-token', values: [], id: 'redirect-created-sheet', name: 'Offline redirect test' }));
     }
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -87,6 +87,43 @@ for (const status of [307, 308]) {
       assert.equal(fixture.state.initial[0].authorization, 'Bearer synthetic-offline-token');
       assert.equal(fixture.state.initial[0].method, operation === 'read' ? 'GET' : 'PUT');
       assert.equal(fixture.state.initial[0].body, operation === 'read' ? '' : JSON.stringify({ values: [['offline', 1]] }));
+      assert.deepEqual(fixture.state.forwarded, []);
+    });
+  }
+
+  for (const boundary of ['folder', 'creation']) {
+    test(`Drive spreadsheet ${boundary} ${status} refuses redirect without replay or false created success`, async context => {
+      const fixture = await redirectFixture(context, status);
+      const nativeFetch = globalThis.fetch;
+      const tools = loadTools(context);
+      let calls = 0;
+      let redirectedCalls = 0;
+      context.mock.method(globalThis, 'fetch', (url, options) => {
+        calls += 1;
+        const address = new URL(url);
+        assert.equal(address.origin, 'https://www.googleapis.com');
+        assert.equal(options.redirect, 'error');
+        assert.equal(options.headers.Authorization, 'Bearer synthetic-offline-token');
+        if (boundary === 'creation' && options.method === 'GET') {
+          assert.equal(address.pathname, '/drive/v3/files/approved-folder');
+          return Promise.resolve({ ok: true, json: async () => ({
+            mimeType: 'application/vnd.google-apps.folder', driveId: 'offline-shared-drive', capabilities: { canAddChildren: true },
+          }) });
+        }
+        redirectedCalls += 1;
+        assert.equal(address.pathname, boundary === 'folder' ? '/drive/v3/files/approved-folder' : '/drive/v3/files');
+        return nativeFetch(fixture.url, options);
+      });
+      await assert.rejects(tools.gdrive_create_spreadsheet.handler({ title: 'Offline redirect test', folder_id: 'approved-folder' }), TypeError);
+      assert.equal(calls, boundary === 'folder' ? 1 : 2);
+      assert.equal(redirectedCalls, 1);
+      assert.equal(fixture.state.initial.length, 1);
+      const initial = fixture.state.initial[0];
+      assert.equal(initial.authorization, 'Bearer synthetic-offline-token');
+      assert.equal(initial.method, boundary === 'folder' ? 'GET' : 'POST');
+      assert.equal(initial.body, boundary === 'folder' ? '' : JSON.stringify({
+        name: 'Offline redirect test', mimeType: 'application/vnd.google-apps.spreadsheet', parents: ['approved-folder'],
+      }));
       assert.deepEqual(fixture.state.forwarded, []);
     });
   }
