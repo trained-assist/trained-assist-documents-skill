@@ -40,6 +40,7 @@ async function sheetsApi(method, apiPath, body = null, sa = null) {
   const token = await getAccessToken(sa);
   const res = await fetch(`https://sheets.googleapis.com/v4${apiPath}`, {
     method,
+    redirect: 'error',
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
     signal: AbortSignal.timeout(15000),
