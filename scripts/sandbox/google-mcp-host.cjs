@@ -41,17 +41,21 @@ function childEnvironment(runtimePath, probe) {
   };
 }
 
+function spawnDomain(env, probe = false) {
+  const childArgs = [path.join(__dirname, '../../src/mcp-skills/index.js')];
+  if (probe) childArgs.unshift('--require', path.join(__dirname, 'google-mcp-probe-guard.cjs'));
+  return spawn(process.execPath, childArgs, {
+    cwd: env.AGENT_DATA_DIR, env, stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+  });
+}
+
 async function main(args) {
   if (args.length !== 3 || args[0] !== '--runtime' || !['--probe', '--serve'].includes(args[2])) {
     throw new Error('INVALID_HOST_ARGUMENTS');
   }
   const probe = args[2] === '--probe';
   const env = childEnvironment(args[1], probe);
-  const childArgs = [path.join(__dirname, '../../src/mcp-skills/index.js')];
-  if (probe) childArgs.unshift('--require', path.join(__dirname, 'google-mcp-probe-guard.cjs'));
-  const child = spawn(process.execPath, childArgs, {
-    cwd: env.AGENT_DATA_DIR, env, stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-  });
+  const child = spawnDomain(env, probe);
   let networkGuardActive = false;
   let blockedNetworkAttempts = 0;
   child.on('message', message => {
@@ -93,7 +97,7 @@ async function main(args) {
     liveGoogleArtifactCalls: 0, networkGuardActive, blockedNetworkAttempts, inheritedEnvironment: false }) + '\n');
 }
 
-module.exports = { privatePath, childEnvironment, main };
+module.exports = { privatePath, childEnvironment, spawnDomain, main };
 if (require.main === module) main(process.argv.slice(2)).catch(() => {
   process.stderr.write('Isolated Google MCP host failed; check private binding and owner approval.\n');
   process.exitCode = 1;

@@ -89,6 +89,10 @@ bounded Sheets tools with private owner-target approval and an allowlisted
 child environment. Runtime credentials stay outside the checkout; see the
 contract document for provisioning, cleanup and host trust boundaries.
 
+[Isolated remote MCP transport](docs/google-mcp-http-v1.md) wraps that same host
+with a loopback HTTP endpoint, host-minted per-task/profile/canonical-run auth
+and owner-target gating. Parent-owned forwarding/resolver integration is separate.
+
 ## Runtime requirements (VM)
 
 - Node ≥ 20; runtime deps `pptxgenjs`, `playwright-core` — core's `deploy.sh` runs

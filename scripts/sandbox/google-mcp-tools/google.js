@@ -15,7 +15,11 @@ function approvedTarget(name, args) {
     const targetPath = path.join(process.env.GOOGLE_MCP_RUNTIME, 'owner-target.json');
     privatePath(targetPath);
     const target = JSON.parse(fs.readFileSync(targetPath, 'utf8'));
-    if (target.profile !== 'sandbox-integrator-google' || target.ownerApproved !== true) throw new Error();
+    const actorProfile = process.env.GOOGLE_MCP_ACTOR_PROFILE;
+    if (actorProfile && (actorProfile !== 'integration-v1' || process.env.USER_ID !== 'sandbox-integrator-google')) throw new Error();
+    if (target.profile !== (actorProfile || 'sandbox-integrator-google') || target.ownerApproved !== true) throw new Error();
+    if (process.env.GOOGLE_MCP_RUN_ID && target.runId !== process.env.GOOGLE_MCP_RUN_ID) throw new Error();
+    if (process.env.GOOGLE_MCP_USER_TASK_ID && target.userTaskId !== process.env.GOOGLE_MCP_USER_TASK_ID) throw new Error();
     if (name === 'gdrive_create_spreadsheet') {
       if (!target.folderId || args.folder_id !== target.folderId) return 'TARGET_NOT_APPROVED';
     } else if (!target.spreadsheetId || args.spreadsheet_id !== target.spreadsheetId) {
