@@ -17,7 +17,7 @@ function fixture(context) {
   fs.chmodSync(runtime, 0o700);
   context.after(() => fs.rmSync(runtime, { recursive: true, force: true }));
   const input = { runtime, runId: `run_${crypto.randomUUID()}`, userTaskId: 'approved-task', expectedActorProfile: 'integration-v1', credentialProfile: 'sandbox-integrator-google', expiresAt: new Date(Date.now() + 3600000).toISOString() };
-  const authorization = { profile: 'integration-v1', userTaskId: input.userTaskId, ownerApproved: true, spreadsheetId: 'approved-sheet', folderId: 'approved-folder' };
+  const authorization = { profile: 'integration-v1', userTaskId: input.userTaskId, ownerApproved: true, spreadsheetId: 'approved-sheet', folderId: 'approved-folder', protectedSourceSheetName: 'Expenses' };
   const authorizationFile = path.join(runtime, 'owner-authorization.json');
   const targetFile = path.join(runtime, 'owner-target.json');
   const bindingFile = path.join(runtime, 'http-binding.json');
@@ -60,7 +60,7 @@ test('trusted approval publishes exact canonical target before binding without r
   assert.equal(fs.readdirSync(runtime).some(name => name.endsWith('.tmp')), false);
 });
 
-for (const change of [{ spreadsheetId: 'different-sheet' }, { folderId: 'different-folder' }, { spreadsheetId: 'different-sheet', folderId: 'different-folder' }]) {
+for (const change of [{ protectedSourceSheetName: 'Other source' }, { protectedSourceSheetName: undefined }, { spreadsheetId: 'different-sheet' }, { folderId: 'different-folder' }, { spreadsheetId: 'different-sheet', folderId: 'different-folder' }]) {
   test(`coordinated substitution of ${Object.keys(change).join('/')} refuses before original handlers with the same run and token`, async context => {
     const { runtime, input, authorization, authorizationFile, targetFile, bindingFile } = fixture(context);
     writePrivate(authorizationFile, authorization);
@@ -128,6 +128,10 @@ for (const [label, change] of [
   ['missing targets', { spreadsheetId: undefined, folderId: undefined }], ['wildcard sheet', { spreadsheetId: '*' }],
   ['URL target', { folderId: 'https://example.invalid/folder' }], ['target array', { spreadsheetId: ['approved-sheet'] }],
   ['model secret field', { authToken: 'synthetic-forbidden' }],
+  ['blank source', { protectedSourceSheetName: '' }], ['source array', { protectedSourceSheetName: ['Expenses'] }],
+  ['source whitespace', { protectedSourceSheetName: ' Expenses ' }], ['source control', { protectedSourceSheetName: 'Expenses\n' }],
+  ['source syntax', { protectedSourceSheetName: 'Expenses:source' }], ['source length', { protectedSourceSheetName: 'x'.repeat(101) }],
+  ['source without sheet', { spreadsheetId: undefined }],
 ]) {
   test(`authorization refuses ${label} before target or binding publication`, context => {
     const { input, authorization, authorizationFile, targetFile, bindingFile } = fixture(context);
@@ -153,6 +157,21 @@ test('missing authorization remains discovery-only and never creates an approved
   mintBinding(input);
   assert.equal(readBinding(runtime).ownerAuthorizationRequired, undefined);
   assert.equal(fs.existsSync(targetFile), false);
+});
+
+test('old six-element scope digest refuses without rewriting the private binding', context => {
+  const { runtime, input, authorization, authorizationFile, bindingFile } = fixture(context);
+  delete authorization.protectedSourceSheetName;
+  writePrivate(authorizationFile, authorization);
+  mintBinding(input);
+  const binding = readBinding(runtime);
+  binding.ownerTargetDigest = crypto.createHash('sha256').update(JSON.stringify([
+    binding.profile, binding.userTaskId, binding.runId, true, authorization.spreadsheetId, authorization.folderId,
+  ])).digest('hex');
+  writePrivate(bindingFile, binding);
+  const before = fs.readFileSync(bindingFile, 'utf8');
+  assert.throws(() => readBinding(runtime), /OWNER_TARGET_CONFLICT/);
+  assert.equal(fs.readFileSync(bindingFile, 'utf8'), before);
 });
 
 test('unsafe approval permissions, symlink and oversized metadata refuse without publication', context => {
@@ -245,6 +264,7 @@ for (const [label, change] of [
   ['actor', { profile: 'sandbox-integrator-google' }], ['task', { userTaskId: 'other-task' }],
   ['run', { runId: `run_${crypto.randomUUID()}` }], ['bare run', { runId: crypto.randomUUID() }],
   ['sheet', { spreadsheetId: 'other-sheet' }], ['folder', { folderId: 'other-folder' }], ['approval', { ownerApproved: false }],
+  ['protected source', { protectedSourceSheetName: 'Other source' }],
 ]) {
   test(`restoration refuses substituted ${label} without remint or repair`, context => {
     const { runtime, input, authorization, authorizationFile, targetFile, bindingFile } = fixture(context);
@@ -283,8 +303,9 @@ test('existing target guard permits only the explicitly approved singleton targe
   Object.assign(process.env, values);
   context.after(() => { for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } });
   for (const name of ['gdrive_read_sheet', 'gdrive_write_sheet']) {
-    assert.equal(approvedTarget(name, { spreadsheet_id: authorization.spreadsheetId }), null);
-    assert.equal(approvedTarget(name, { spreadsheet_id: 'other-sheet' }), 'TARGET_NOT_APPROVED');
+    const args = { sheet_name: 'Category results', operationId: 'approved-result' };
+    assert.equal(approvedTarget(name, { ...args, spreadsheet_id: authorization.spreadsheetId }), null);
+    assert.equal(approvedTarget(name, { ...args, spreadsheet_id: 'other-sheet' }), 'TARGET_NOT_APPROVED');
   }
   assert.equal(approvedTarget('gdrive_create_spreadsheet', { folder_id: authorization.folderId }), null);
   assert.equal(approvedTarget('gdrive_create_spreadsheet', { folder_id: 'other-folder' }), 'TARGET_NOT_APPROVED');
@@ -301,4 +322,66 @@ test('startup refuses a missing exact target before spawning any domain child', 
   try { await assert.rejects(createHttpHost({ runtime }), /OWNER_TARGET_CONFLICT/); }
   finally { stdioHost.spawnDomain = originalSpawn; }
   assert.equal(spawns, 0);
+});
+
+test('canonical direct writes enforce pinned source and operation mode before the provider', async context => {
+  const { runtime, input, authorization, authorizationFile, bindingFile } = fixture(context);
+  writePrivate(authorizationFile, authorization);
+  mintBinding(input);
+  const values = { GOOGLE_MCP_RUNTIME: runtime, GOOGLE_MCP_PROBE_ONLY: '0', USER_ID: input.credentialProfile,
+    GOOGLE_MCP_ACTOR_PROFILE: input.expectedActorProfile, GOOGLE_MCP_USER_TASK_ID: input.userTaskId, GOOGLE_MCP_RUN_ID: input.runId };
+  const previous = Object.fromEntries(Object.keys(values).map(name => [name, process.env[name]]));
+  Object.assign(process.env, values);
+  const handler = original.tools.gdrive_write_sheet.handler;
+  const calls = [];
+  original.tools.gdrive_write_sheet.handler = async args => { calls.push(args); return { verified: true }; };
+  try {
+    const args = { spreadsheet_id: authorization.spreadsheetId, sheet_name: 'Category results', operationId: 'category:v1', rows: [['Category', 'Total']], clear_first: true };
+    for (const [change, code] of [
+      [{ operationId: undefined }, 'SHEETS_INVALID_INPUT'], [{ operationId: '' }, 'SHEETS_INVALID_INPUT'],
+      [{ operationId: {} }, 'SHEETS_INVALID_INPUT'], [{ operationId: 'bad op' }, 'SHEETS_INVALID_INPUT'],
+      [{ sheet_name: 'Expenses' }, 'SHEETS_SOURCE_PROTECTED'], [{ sheet_name: 'expenses' }, 'SHEETS_SOURCE_PROTECTED'],
+      [{ sheet_name: ' Expenses ' }, 'SHEETS_INVALID_INPUT'], [{ source_sheet_name: 'Other source' }, 'SHEETS_SOURCE_PROTECTED'],
+      [{ source_sheet_name: null }, 'SHEETS_SOURCE_PROTECTED'],
+    ]) await assert.rejects(wrapper.tools.gdrive_write_sheet.handler({ ...args, ...change }), new RegExp(code));
+    assert.equal(calls.length, 0);
+    assert.deepEqual(await wrapper.tools.gdrive_write_sheet.handler(args), { verified: true });
+    assert.equal(calls[0], args);
+    const binding = readBinding(runtime);
+    writePrivate(bindingFile, { ...binding, protectedSourceSheetName: 'Other source' });
+    await assert.rejects(wrapper.tools.gdrive_write_sheet.handler(args), /OWNER_TARGET_REQUIRED/);
+    assert.equal(calls.length, 1);
+  } finally {
+    original.tools.gdrive_write_sheet.handler = handler;
+    for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+});
+
+test('missing source pin preserves scoped reads but refuses writes; unscoped legacy stays unchanged', async context => {
+  const { runtime, input, authorization, authorizationFile, targetFile } = fixture(context);
+  delete authorization.protectedSourceSheetName;
+  writePrivate(authorizationFile, authorization);
+  mintBinding(input);
+  const values = { GOOGLE_MCP_RUNTIME: runtime, GOOGLE_MCP_PROBE_ONLY: '0', USER_ID: input.credentialProfile,
+    GOOGLE_MCP_ACTOR_PROFILE: input.expectedActorProfile, GOOGLE_MCP_USER_TASK_ID: input.userTaskId, GOOGLE_MCP_RUN_ID: input.runId };
+  const previous = Object.fromEntries(Object.keys(values).map(name => [name, process.env[name]]));
+  Object.assign(process.env, values);
+  const handler = original.tools.gdrive_write_sheet.handler;
+  let calls = 0;
+  original.tools.gdrive_write_sheet.handler = async () => { calls++; return 'legacy'; };
+  try {
+    assert.equal(approvedTarget('gdrive_read_sheet', { spreadsheet_id: authorization.spreadsheetId }), null);
+    await assert.rejects(wrapper.tools.gdrive_write_sheet.handler({ spreadsheet_id: authorization.spreadsheetId,
+      sheet_name: 'Category results', operationId: 'result:v1' }), /SHEETS_SOURCE_PROTECTED/);
+    assert.equal(calls, 0);
+    delete process.env.GOOGLE_MCP_RUN_ID;
+    delete process.env.GOOGLE_MCP_ACTOR_PROFILE;
+    delete process.env.GOOGLE_MCP_USER_TASK_ID;
+    writePrivate(targetFile, { profile: input.credentialProfile, ownerApproved: true, spreadsheetId: authorization.spreadsheetId });
+    assert.equal(await wrapper.tools.gdrive_write_sheet.handler({ spreadsheet_id: authorization.spreadsheetId, sheet_name: 'Expenses' }), 'legacy');
+    assert.equal(calls, 1);
+  } finally {
+    original.tools.gdrive_write_sheet.handler = handler;
+    for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
 });

@@ -33,10 +33,11 @@ function runtimeFixture(context) {
   return runtime;
 }
 
-async function hostFixture(context, approved = false) {
+async function hostFixture(context, approved = false, protectedSourceSheetName = 'Expenses') {
   const runtime = runtimeFixture(context);
   if (approved) fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify({
     profile, userTaskId, ownerApproved: true, spreadsheetId: 'approved-sheet',
+    ...(protectedSourceSheetName ? { protectedSourceSheetName } : {}),
   }), { mode: 0o600 });
   mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
   const binding = readBinding(runtime);
@@ -176,10 +177,32 @@ test('each of the three real handlers refuses missing owner approval without Goo
   const { post } = await hostFixture(context);
   for (const name of ['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']) {
     const result = await post({ jsonrpc: '2.0', id: name, method: 'tools/call', params: { name, arguments: {} } });
-    assert.equal(result.body.error.message, 'OWNER_TARGET_REQUIRED');
+    assert.equal(result.body.error.message, name === 'gdrive_write_sheet' ? 'SHEETS_SOURCE_PROTECTED' : 'OWNER_TARGET_REQUIRED');
   }
   const hidden = await post({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'gdrive_setup' } });
   assert.equal(hidden.body.error.message, 'METHOD_NOT_ALLOWED');
+});
+
+test('HTTP writes refuse source and operation bypasses before domain provider dispatch', async context => {
+  const { post } = await hostFixture(context, true);
+  const args = { spreadsheet_id: 'approved-sheet', sheet_name: 'Category results', operationId: 'category:v1', rows: [['Total', 1]] };
+  for (const [change, code] of [
+    [{ operationId: undefined }, 'SHEETS_INVALID_INPUT'], [{ operationId: 'bad op' }, 'SHEETS_INVALID_INPUT'],
+    [{ sheet_name: 'Expenses' }, 'SHEETS_SOURCE_PROTECTED'], [{ sheet_name: 'expenses' }, 'SHEETS_SOURCE_PROTECTED'],
+    [{ source_sheet_name: 'Not Expenses' }, 'SHEETS_SOURCE_PROTECTED'],
+  ]) {
+    const result = await post({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'gdrive_write_sheet', arguments: { ...args, ...change } } });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.error.message, code);
+  }
+});
+
+test('HTTP approved scopes without a source pin cannot write', async context => {
+  const { post } = await hostFixture(context, true, null);
+  const result = await post({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'gdrive_write_sheet', arguments: {
+    spreadsheet_id: 'approved-sheet', sheet_name: 'Category results', operationId: 'result:v1', rows: [['Total', 1]],
+  } } });
+  assert.equal(result.body.error.message, 'SHEETS_SOURCE_PROTECTED');
 });
 
 test('owner approval is also canonical-run and task bound before artifact networking', async context => {
@@ -187,7 +210,7 @@ test('owner approval is also canonical-run and task bound before artifact networ
   const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
     name: 'gdrive_read_sheet', arguments: { spreadsheet_id: 'different-sheet', sheet_name: 'Expenses' },
   } };
-  const target = { profile, userTaskId, runId: `run_${crypto.randomUUID()}`, ownerApproved: true, spreadsheetId: 'approved-sheet' };
+  const target = { profile, userTaskId, runId: `run_${crypto.randomUUID()}`, ownerApproved: true, spreadsheetId: 'approved-sheet', protectedSourceSheetName: 'Expenses' };
   const file = path.join(runtime, 'owner-target.json');
   fs.writeFileSync(file, JSON.stringify(target), { mode: 0o600 });
   assert.equal((await post(request)).status, 401);
