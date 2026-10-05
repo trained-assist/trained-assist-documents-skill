@@ -150,6 +150,22 @@ remains the separately authorized procedure in the stdio documentation.
 
 ## Offline validation
 
+Real local socket/child preflight, requiring no live credentials or owner binding:
+
+```bash
+node scripts/sandbox/google-mcp-http-preflight.cjs
+```
+
+It creates a private ephemeral runtime with freshly generated synthetic encryption
+and bearer values, an invalid synthetic SA key and a canonical `run_<UUID>`.
+It exercises no bearer, wrong actor/run/task, Origin, authenticated initialization
+and exact tool discovery, missing owner target and wrong targets for all three
+tools. The domain child uses the existing networking-denial preload; evidence
+requires guard activation and zero attempted provider networking. After confirming
+child exit, it removes the synthetic runtime and prints only safe probe evidence.
+It never reads a real SA/root credential, mints a live/private owner binding,
+calls Google, starts a tunnel or uses a production endpoint.
+
 ```bash
 node --test tests/google-mcp-http.test.js tests/google-mcp-host.test.js \
   tests/gdrive-sheets.test.js tests/google-expenses-fixture.test.js
