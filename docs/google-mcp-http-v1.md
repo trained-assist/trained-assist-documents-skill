@@ -14,21 +14,31 @@ sent to the engine. Live artifact access requires separate owner target approval
 
 The trusted resolver maps its binding reference to the already-provisioned
 isolated runtime on the documents host. After Runner normalization, register
-`userTaskId`, the dedicated profile and the **canonical Runner ID `run_<UUID>`**, not
+`userTaskId`, the actual actor profile **`integration-v1`** and the **canonical Runner ID `run_<UUID>`**, not
 CP's original `spec.runId`. Registration must precede engine/model access.
 Keep the exact `run_` prefix in mint inputs, private bindings, scope headers and
 owner approval. Bare UUIDs and other prefixes are rejected; no normalization or
 scope relaxation is performed by this host.
 
-Call the exported `mintBinding({runtime, userTaskId, profile, runId, expiresAt})`
+Call the exported `mintBinding({runtime, userTaskId, expectedActorProfile, credentialProfile, runId, expiresAt})`
 from `scripts/sandbox/google-mcp-http.cjs`, or use its operator CLI:
 
 ```bash
 node scripts/sandbox/google-mcp-http-mint.cjs \
   --runtime /absolute/private/google-runtime \
-  --user-task-id REGISTERED_TASK_ID --profile sandbox-integrator-google \
+  --user-task-id REGISTERED_TASK_ID --actor-profile integration-v1 \
+  --credential-profile sandbox-integrator-google \
   --run-id CANONICAL_RUNNER_ID --expires-at FUTURE_ISO_TIMESTAMP
 ```
+
+Operator registration explicitly pins `expectedActorProfile: "integration-v1"`
+and `credentialProfile: "sandbox-integrator-google"`; any other or missing pair
+fails closed. The private binding stores actor identity as `profile` and physical
+mount as `credentialProfile`. Scope headers and owner-target metadata use the
+actor, never the vault folder. The child always receives `USER_ID` equal to the
+registered, hard-pinned credential profile. Model arguments, engine headers and
+CP actor identity cannot select another vault user or credential path. Existing
+standalone stdio behavior remains unchanged.
 
 Minting writes a fresh random 256-bit opaque token to `http-binding.json` in
 the private runtime (`0600`, exclusive creation), returning only scope/expiry
@@ -61,7 +71,7 @@ supports named servers, header env references and separate `mcpSecrets`:
         "headers": {
           "Authorization": "Bearer {env:GOOGLE_DOCUMENTS_MCP_TOKEN}",
           "X-MCP-User-Task-Id": "REGISTERED_TASK_ID",
-          "X-MCP-Profile": "sandbox-integrator-google",
+          "X-MCP-Profile": "integration-v1",
           "X-MCP-Run-Id": "CANONICAL_RUNNER_ID"
         }
       }
@@ -114,7 +124,7 @@ task ID and canonical `run_<UUID>` ID:
 
 ```json
 {
-  "profile": "sandbox-integrator-google",
+  "profile": "integration-v1",
   "userTaskId": "REGISTERED_TASK_ID",
   "runId": "CANONICAL_RUNNER_ID",
   "ownerApproved": true,

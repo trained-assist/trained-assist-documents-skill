@@ -17,23 +17,36 @@ function readBinding(runtime) {
   const file = path.join(runtime, 'http-binding.json');
   privatePath(file);
   const binding = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!runUuid.test(binding.runId || '') || !identifier.test(binding.userTaskId || '') || binding.profile !== 'sandbox-integrator-google' ||
+  if (!runUuid.test(binding.runId || '') || !identifier.test(binding.userTaskId || '') || binding.profile !== 'integration-v1' ||
+      binding.credentialProfile !== 'sandbox-integrator-google' ||
       !/^[A-Za-z0-9_-]{43,128}$/.test(binding.authToken || '') ||
       !Number.isFinite(Date.parse(binding.expiresAt)) || Date.parse(binding.expiresAt) <= Date.now() ||
       Date.parse(binding.expiresAt) > Date.now() + 86400000) throw new Error('INVALID_HTTP_BINDING');
   return binding;
 }
 
-function mintBinding({ runtime: runtimePath, runId, userTaskId, profile, expiresAt }) {
+function mintBinding({ runtime: runtimePath, runId, userTaskId, expectedActorProfile, credentialProfile, expiresAt }) {
   privatePath(runtimePath, true);
   const runtime = fs.realpathSync(runtimePath);
-  if (!runUuid.test(runId || '') || !identifier.test(userTaskId || '') || profile !== 'sandbox-integrator-google' ||
+  if (!runUuid.test(runId || '') || !identifier.test(userTaskId || '') || expectedActorProfile !== 'integration-v1' ||
+      credentialProfile !== 'sandbox-integrator-google' ||
       !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now() ||
       Date.parse(expiresAt) > Date.now() + 86400000) throw new Error('INVALID_HTTP_BINDING');
   fs.writeFileSync(path.join(runtime, 'http-binding.json'), JSON.stringify({
-    runId, userTaskId, profile, expiresAt, authToken: crypto.randomBytes(32).toString('base64url'),
+    runId, userTaskId, profile: expectedActorProfile, credentialProfile, expiresAt, authToken: crypto.randomBytes(32).toString('base64url'),
   }) + '\n', { mode: 0o600, flag: 'wx' });
-  return { runId, userTaskId, profile, expiresAt };
+  return { runId, userTaskId, profile: expectedActorProfile, credentialProfile, expiresAt };
+}
+
+function registeredDomainEnvironment(runtime, binding) {
+  if (binding.profile !== 'integration-v1' || binding.credentialProfile !== 'sandbox-integrator-google') {
+    throw new Error('INVALID_HTTP_BINDING');
+  }
+  const env = childEnvironment(runtime, false);
+  env.GOOGLE_MCP_ACTOR_PROFILE = binding.profile;
+  env.GOOGLE_MCP_RUN_ID = binding.runId;
+  env.GOOGLE_MCP_USER_TASK_ID = binding.userTaskId;
+  return env;
 }
 
 function equalToken(received, expected) {
@@ -131,11 +144,10 @@ async function requestBody(request) {
 }
 
 async function createHttpHost({ runtime: runtimePath, port = 0 }) {
-  const env = childEnvironment(runtimePath, false);
-  const runtime = env.GOOGLE_MCP_RUNTIME;
+  privatePath(runtimePath, true);
+  const runtime = fs.realpathSync(runtimePath);
   const initial = readBinding(runtime);
-  env.GOOGLE_MCP_RUN_ID = initial.runId;
-  env.GOOGLE_MCP_USER_TASK_ID = initial.userTaskId;
+  const env = registeredDomainEnvironment(runtime, initial);
   const rpc = stdioRpc(spawnDomain(env));
   try {
     const catalog = await rpc.call('tools/list', {});
@@ -146,6 +158,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
     try {
       const binding = readBinding(runtime);
       if (binding.runId !== initial.runId || binding.userTaskId !== initial.userTaskId || binding.profile !== initial.profile ||
+          binding.credentialProfile !== initial.credentialProfile ||
           !equalToken(request.headers.authorization, binding.authToken)) return { status: 401, error: 'AUTH_REQUIRED' };
       if (request.headers['x-mcp-run-id'] !== binding.runId || request.headers['x-mcp-profile'] !== binding.profile ||
           request.headers['x-mcp-user-task-id'] !== binding.userTaskId) return { status: 403, error: 'SCOPE_DENIED' };
@@ -228,7 +241,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
   } };
 }
 
-module.exports = { createHttpHost, readBinding, mintBinding, equalToken, stdioRpc };
+module.exports = { createHttpHost, readBinding, mintBinding, registeredDomainEnvironment, equalToken, stdioRpc };
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.length !== 4 || args[0] !== '--runtime' || args[2] !== '--port' || !/^\d{1,5}$/.test(args[3]) || Number(args[3]) > 65535) {

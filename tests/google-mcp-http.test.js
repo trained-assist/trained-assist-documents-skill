@@ -9,10 +9,11 @@ const crypto = require('node:crypto');
 const http = require('node:http');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { createHttpHost, mintBinding, readBinding, stdioRpc } = require('../scripts/sandbox/google-mcp-http.cjs');
+const { createHttpHost, mintBinding, readBinding, registeredDomainEnvironment, stdioRpc } = require('../scripts/sandbox/google-mcp-http.cjs');
 const runId = `run_${crypto.randomUUID()}`;
 const userTaskId = 'ut-test-google';
-const profile = 'sandbox-integrator-google';
+const profile = 'integration-v1';
+const credentialProfile = 'sandbox-integrator-google';
 
 function runtimeFixture(context) {
   const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'google-http-test-'));
@@ -34,7 +35,7 @@ function runtimeFixture(context) {
 
 async function hostFixture(context) {
   const runtime = runtimeFixture(context);
-  mintBinding({ runtime, runId, userTaskId, profile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
+  mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
   const binding = readBinding(runtime);
   const host = await createHttpHost({ runtime });
   context.after(() => host.close());
@@ -54,19 +55,23 @@ async function hostFixture(context) {
 
 test('host-only mint returns metadata, persists a private opaque token and refuses reuse', context => {
   const runtime = runtimeFixture(context);
-  const inputs = { runtime, runId, userTaskId, profile, expiresAt: new Date(Date.now() + 3600000).toISOString() };
-  assert.deepEqual(mintBinding(inputs), { runId, userTaskId, profile, expiresAt: inputs.expiresAt });
+  const inputs = { runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() };
+  assert.deepEqual(mintBinding(inputs), { runId, userTaskId, profile, credentialProfile, expiresAt: inputs.expiresAt });
   const binding = readBinding(runtime);
   assert.equal(binding.authToken.length, 43);
   assert.equal(fs.statSync(path.join(runtime, 'http-binding.json')).mode & 0o777, 0o600);
   assert.throws(() => mintBinding(inputs), /EEXIST/);
-  assert.throws(() => mintBinding({ ...inputs, profile: 'real-user' }), /INVALID_HTTP_BINDING/);
+  assert.throws(() => mintBinding({ ...inputs, expectedActorProfile: 'real-user' }), /INVALID_HTTP_BINDING/);
+  assert.throws(() => mintBinding({ ...inputs, expectedActorProfile: credentialProfile }), /INVALID_HTTP_BINDING/);
+  assert.throws(() => mintBinding({ ...inputs, expectedActorProfile: undefined }), /INVALID_HTTP_BINDING/);
+  assert.throws(() => mintBinding({ ...inputs, credentialProfile: 'real-user' }), /INVALID_HTTP_BINDING/);
+  assert.throws(() => mintBinding({ ...inputs, credentialProfile: undefined }), /INVALID_HTTP_BINDING/);
   assert.throws(() => mintBinding({ ...inputs, expiresAt: new Date(Date.now() - 1).toISOString() }), /INVALID_HTTP_BINDING/);
 });
 
 test('mint and private binding accept only canonical run_<UUID> IDs', context => {
   const runtime = runtimeFixture(context);
-  const inputs = { runtime, runId, userTaskId, profile, expiresAt: new Date(Date.now() + 3600000).toISOString() };
+  const inputs = { runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() };
   const invalidIds = [runId.slice(4), `RUN_${runId.slice(4)}`, `job_${runId.slice(4)}`,
     `run_${runId}`, 'run_not-a-uuid', runId.slice(0, -1)];
   const file = path.join(runtime, 'http-binding.json');
@@ -87,9 +92,26 @@ test('mint and private binding accept only canonical run_<UUID> IDs', context =>
 
 test('HTTP startup refuses unavailable SA readiness without exposing decryption errors', async context => {
   const runtime = runtimeFixture(context);
-  mintBinding({ runtime, runId, userTaskId, profile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
+  mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
   fs.writeFileSync(path.join(runtime, '.host-encryption-key'), crypto.randomBytes(32).toString('hex'));
   await assert.rejects(createHttpHost({ runtime }), /^Error: DOMAIN_NOT_READY$/);
+});
+
+test('trusted actor registration never changes the hard-pinned credential mount or inherits secrets', context => {
+  const runtime = runtimeFixture(context);
+  const binding = { profile, credentialProfile, userTaskId, runId, authToken: 'private-transport-token' };
+  const env = registeredDomainEnvironment(runtime, binding);
+  assert.equal(env.GOOGLE_MCP_ACTOR_PROFILE, 'integration-v1');
+  assert.equal(env.USER_ID, 'sandbox-integrator-google');
+  assert.equal(env.GOOGLE_MCP_USER_TASK_ID, userTaskId);
+  assert.equal(env.GOOGLE_MCP_RUN_ID, runId);
+  for (const name of ['authToken', 'GOOGLE_DOCUMENTS_MCP_TOKEN', 'GDRIVE_SA_JSON', 'GOOGLE_APPLICATION_CREDENTIALS', 'AGENT_SECRET', 'OPENAI_API_KEY']) {
+    assert.equal(env[name], undefined);
+  }
+  for (const invalid of [{ ...binding, profile: credentialProfile }, { ...binding, credentialProfile: 'integration-v1' },
+    { ...binding, credentialProfile: 'real-user' }, { ...binding, credentialProfile: undefined }]) {
+    assert.throws(() => registeredDomainEnvironment(runtime, invalid), /INVALID_HTTP_BINDING/);
+  }
 });
 
 test('remote JSON handshake negotiates HTTP protocol and exposes exactly three tools', async context => {
@@ -109,7 +131,7 @@ test('auth and canonical task/profile/run scope refuse before any domain calls',
   const request = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
   assert.equal((await post(request, { Authorization: 'Bearer untrusted' })).status, 401);
   for (const mismatch of [{ 'X-MCP-Run-Id': `run_${crypto.randomUUID()}` }, { 'X-MCP-Run-Id': runId.slice(4) },
-    { 'X-MCP-Profile': 'real-user' }, { 'X-MCP-User-Task-Id': 'another-task' }]) {
+    { 'X-MCP-Profile': credentialProfile }, { 'X-MCP-Profile': 'real-user' }, { 'X-MCP-User-Task-Id': 'another-task' }]) {
     assert.equal((await post(request, mismatch)).status, 403);
   }
   assert.equal((await post(request, { Origin: 'https://untrusted.invalid' })).status, 403);
@@ -136,6 +158,8 @@ test('owner approval is also canonical-run and task bound before artifact networ
   assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
   fs.writeFileSync(file, JSON.stringify({ ...target, runId, userTaskId: 'another-task' }));
   assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
+  fs.writeFileSync(file, JSON.stringify({ ...target, runId, profile: credentialProfile }));
+  assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');
   fs.writeFileSync(file, JSON.stringify({ ...target, runId }));
   assert.equal((await post(request)).body.error.message, 'TARGET_NOT_APPROVED');
 });
@@ -147,6 +171,8 @@ test('revocation, expiry and scope-file substitution fail closed on every reques
   fs.writeFileSync(file, JSON.stringify({ ...binding, expiresAt: new Date(Date.now() - 1).toISOString() }));
   assert.equal((await post(request)).status, 401);
   fs.writeFileSync(file, JSON.stringify({ ...binding, userTaskId: 'substituted-task' }));
+  assert.equal((await post(request)).status, 401);
+  fs.writeFileSync(file, JSON.stringify({ ...binding, credentialProfile: 'integration-v1' }));
   assert.equal((await post(request)).status, 401);
   fs.unlinkSync(file);
   assert.equal((await post(request)).status, 401);
