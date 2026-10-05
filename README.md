@@ -83,6 +83,12 @@ category and month totals. The fixture prints offline JSON by default. Live use
 requires an explicit isolated service-account binding; module tests do not prove
 Runner MCP transport or credentials/awaiting-task integration.
 
+`scripts/sandbox/google-mcp-host.cjs --runtime /absolute/private/runtime --probe`
+checks the real stdio MCP host offline. `--serve` exposes exactly the three
+bounded Sheets tools with private owner-target approval and an allowlisted
+child environment. Runtime credentials stay outside the checkout; see the
+contract document for provisioning, cleanup and host trust boundaries.
+
 ## Runtime requirements (VM)
 
 - Node ≥ 20; runtime deps `pptxgenjs`, `playwright-core` — core's `deploy.sh` runs
