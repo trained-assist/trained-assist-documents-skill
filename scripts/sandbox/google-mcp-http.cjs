@@ -10,6 +10,8 @@ const versions = new Set(['2025-03-26', '2025-06-18', '2025-11-25']);
 const tools = new Set(['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']);
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
 const runUuid = /^run_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const sheetName = value => typeof value === 'string' && value.length > 0 && value.length <= 100 &&
+  value === value.trim() && !/[\u0000-\u001f\u007f\[\]:*?/\\]/.test(value);
 const safeErrors = new Set(['OWNER_TARGET_REQUIRED', 'TARGET_NOT_APPROVED', 'GOOGLE_TOOL_FAILED',
   'SHEETS_API_ERROR', 'SHEETS_FOLDER_UNAVAILABLE', 'SHEETS_INVALID_INPUT', 'SHEETS_OPERATION_CONFLICT',
   'SHEETS_OUTCOME_UNKNOWN', 'SHEETS_SOURCE_PROTECTED', 'SHEETS_TAB_NOT_FOUND', 'SHEETS_TARGET_EXISTS']);
@@ -32,11 +34,13 @@ function ownerAuthorization(runtime, scope, required = false) {
     throw new Error('INVALID_OWNER_AUTHORIZATION');
   }
   if (!authorization || typeof authorization !== 'object' || Array.isArray(authorization) ||
-      Object.keys(authorization).some(key => !['profile', 'userTaskId', 'ownerApproved', 'spreadsheetId', 'folderId'].includes(key)) ||
+      Object.keys(authorization).some(key => !['profile', 'userTaskId', 'ownerApproved', 'spreadsheetId', 'folderId', 'protectedSourceSheetName'].includes(key)) ||
       authorization.profile !== scope.profile || authorization.userTaskId !== scope.userTaskId || authorization.ownerApproved !== true ||
       (!authorization.spreadsheetId && !authorization.folderId) ||
       ['spreadsheetId', 'folderId'].some(key => Object.hasOwn(authorization, key) &&
-        (typeof authorization[key] !== 'string' || !identifier.test(authorization[key])))) throw new Error('INVALID_OWNER_AUTHORIZATION');
+        (typeof authorization[key] !== 'string' || !identifier.test(authorization[key]))) ||
+      (Object.hasOwn(authorization, 'protectedSourceSheetName') &&
+        (!authorization.spreadsheetId || !sheetName(authorization.protectedSourceSheetName)))) throw new Error('INVALID_OWNER_AUTHORIZATION');
   return authorization;
 }
 
@@ -45,17 +49,29 @@ function exactOwnerTarget(runtime, binding, authorization) {
   try { target = readPrivateJson(path.join(runtime, 'owner-target.json')); }
   catch { throw new Error('OWNER_TARGET_CONFLICT'); }
   if (!target || typeof target !== 'object' || Array.isArray(target) ||
-      Object.keys(target).some(key => !['profile', 'userTaskId', 'runId', 'ownerApproved', 'spreadsheetId', 'folderId'].includes(key)) ||
+      Object.keys(target).some(key => !['profile', 'userTaskId', 'runId', 'ownerApproved', 'spreadsheetId', 'folderId', 'protectedSourceSheetName'].includes(key)) ||
       target.profile !== binding.profile || target.userTaskId !== binding.userTaskId || target.runId !== binding.runId ||
       target.ownerApproved !== true || target.spreadsheetId !== authorization.spreadsheetId ||
-      target.folderId !== authorization.folderId) throw new Error('OWNER_TARGET_CONFLICT');
+      target.folderId !== authorization.folderId || target.protectedSourceSheetName !== authorization.protectedSourceSheetName) throw new Error('OWNER_TARGET_CONFLICT');
 }
 
 function ownerTargetDigest(scope, authorization) {
   return crypto.createHash('sha256').update(JSON.stringify([
     scope.profile, scope.userTaskId, scope.runId, authorization !== null,
     authorization?.spreadsheetId ?? null, authorization?.folderId ?? null,
+    authorization?.protectedSourceSheetName ?? null,
   ])).digest('hex');
+}
+
+function scopedWriteRefusal(args, protectedSourceSheetName) {
+  if (!sheetName(protectedSourceSheetName)) return 'SHEETS_SOURCE_PROTECTED';
+  if (!args || typeof args !== 'object' || Array.isArray(args) ||
+      typeof args.operationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(args.operationId) ||
+      !sheetName(args.sheet_name)) return 'SHEETS_INVALID_INPUT';
+  const source = protectedSourceSheetName.toLowerCase();
+  if (args.sheet_name.toLowerCase() === source || (args.source_sheet_name !== undefined &&
+      (!sheetName(args.source_sheet_name) || args.source_sheet_name.toLowerCase() !== source))) return 'SHEETS_SOURCE_PROTECTED';
+  return null;
 }
 
 function publishPrivateJson(runtime, name, value) {
@@ -86,6 +102,7 @@ function readBinding(runtime) {
   if (typeof binding.ownerTargetDigest !== 'string' || !/^[a-f0-9]{64}$/.test(binding.ownerTargetDigest)) throw new Error('INVALID_HTTP_BINDING');
   if (Object.hasOwn(binding, 'ownerAuthorizationRequired') && binding.ownerAuthorizationRequired !== true) throw new Error('INVALID_HTTP_BINDING');
   const authorization = ownerAuthorization(runtime, binding, binding.ownerAuthorizationRequired === true);
+  if (binding.protectedSourceSheetName !== authorization?.protectedSourceSheetName) throw new Error('OWNER_TARGET_CONFLICT');
   if (binding.ownerTargetDigest !== ownerTargetDigest(binding, authorization)) throw new Error('OWNER_TARGET_CONFLICT');
   if (authorization) exactOwnerTarget(runtime, binding, authorization);
   else {
@@ -118,6 +135,7 @@ function mintBinding({ runtime: runtimePath, runId, userTaskId, expectedActorPro
   publishPrivateJson(runtime, 'http-binding.json', {
     ...scope, credentialProfile, expiresAt, authToken: crypto.randomBytes(32).toString('base64url'),
     ownerTargetDigest: ownerTargetDigest(scope, authorization),
+    ...(authorization?.protectedSourceSheetName ? { protectedSourceSheetName: authorization.protectedSourceSheetName } : {}),
     ...(authorization ? { ownerAuthorizationRequired: true } : {}),
   });
   return { runId, userTaskId, profile: expectedActorProfile, credentialProfile, expiresAt };
@@ -316,6 +334,12 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
       const refusal = { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'METHOD_NOT_ALLOWED' } };
       if (!['initialize', 'tools/list', 'tools/call', 'ping'].includes(message.method)) return jsonResponse(response, 200, refusal);
       if (message.method === 'tools/call' && !tools.has(message.params?.name)) return jsonResponse(response, 200, refusal);
+      if (message.method === 'tools/call' && message.params.name === 'gdrive_write_sheet') {
+        const writeRefusal = scopedWriteRefusal(message.params.arguments, readBinding(runtime).protectedSourceSheetName);
+        if (writeRefusal) return jsonResponse(response, 200, {
+          jsonrpc: '2.0', id: message.id, error: { code: -32603, message: writeRefusal },
+        });
+      }
       let result;
       if (message.method === 'ping') result = { result: {} };
       else {
@@ -360,7 +384,7 @@ async function createHttpHost({ runtime: runtimePath, port = 0 }) {
   } };
 }
 
-module.exports = { createHttpHost, readBinding, mintBinding, registeredDomainEnvironment, equalToken, stdioRpc, ownerTargetDigest };
+module.exports = { createHttpHost, readBinding, mintBinding, registeredDomainEnvironment, equalToken, stdioRpc, ownerTargetDigest, scopedWriteRefusal };
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.length !== 4 || args[0] !== '--runtime' || args[2] !== '--port' || !/^\d{1,5}$/.test(args[3]) || Number(args[3]) > 65535) {

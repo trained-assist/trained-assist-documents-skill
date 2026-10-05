@@ -21,10 +21,14 @@ function approvedTarget(name, args) {
     if (process.env.GOOGLE_MCP_RUN_ID && target.runId !== process.env.GOOGLE_MCP_RUN_ID) throw new Error();
     if (process.env.GOOGLE_MCP_USER_TASK_ID && target.userTaskId !== process.env.GOOGLE_MCP_USER_TASK_ID) throw new Error();
     if (process.env.GOOGLE_MCP_RUN_ID) {
-      const { readBinding, ownerTargetDigest } = require('../google-mcp-http.cjs');
+      const { readBinding, ownerTargetDigest, scopedWriteRefusal } = require('../google-mcp-http.cjs');
       const binding = readBinding(process.env.GOOGLE_MCP_RUNTIME);
       if (binding.runId !== process.env.GOOGLE_MCP_RUN_ID || binding.userTaskId !== process.env.GOOGLE_MCP_USER_TASK_ID ||
           binding.profile !== actorProfile || binding.ownerTargetDigest !== ownerTargetDigest(binding, target)) throw new Error();
+      if (name === 'gdrive_write_sheet') {
+        const refusal = scopedWriteRefusal(args, binding.protectedSourceSheetName);
+        if (refusal) return refusal;
+      }
     }
     if (name === 'gdrive_create_spreadsheet') {
       if (!target.folderId || args.folder_id !== target.folderId) return 'TARGET_NOT_APPROVED';

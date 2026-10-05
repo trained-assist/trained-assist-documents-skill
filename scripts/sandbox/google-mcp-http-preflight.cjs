@@ -47,7 +47,7 @@ async function main() {
     const runId = `run_${crypto.randomUUID()}`;
     const userTaskId = 'preflight-google-task';
     const authorization = { profile: 'integration-v1', userTaskId, ownerApproved: true,
-      spreadsheetId: 'synthetic-approved-sheet', folderId: 'synthetic-approved-folder' };
+      spreadsheetId: 'synthetic-approved-sheet', folderId: 'synthetic-approved-folder', protectedSourceSheetName: 'Expenses' };
     fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify(authorization), { mode: 0o600 });
     mintBinding({ runtime, runId, userTaskId, expectedActorProfile: 'integration-v1',
       credentialProfile: 'sandbox-integrator-google', expiresAt: new Date(Date.now() + 300000).toISOString() });
@@ -89,7 +89,7 @@ async function main() {
     fs.writeFileSync(path.join(runtime, 'owner-target.json'), JSON.stringify({ ...authorization, runId }), { mode: 0o600 });
     for (const name of toolNames) {
       await probe(`wrong_target:${name}`, 200, 'TARGET_NOT_APPROVED', 'tools/call', {
-        name, arguments: { spreadsheet_id: 'synthetic-unapproved-sheet', folder_id: 'synthetic-unapproved-folder', sheet_name: 'Expenses' },
+        name, arguments: { spreadsheet_id: 'synthetic-unapproved-sheet', folder_id: 'synthetic-unapproved-folder', sheet_name: 'Category results', operationId: 'preflight-result' },
       });
     }
     await host.close();
