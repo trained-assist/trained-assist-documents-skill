@@ -235,6 +235,14 @@ of the MCP launcher or offline tests.
 
 ## Validation
 
+The actual Node OAuth JWT exchange and Sheets bearer requests use
+`redirect: 'error'` at their fixed Google endpoints. A redirect fails the
+request rather than forwarding credentials or replaying its body; this also
+applies inside the HTTP-to-stdio MCP host without a preparation/probe override.
+`node --test tests/google-node-redirect.test.js` exercises real Node fetch
+against local 307/308 fixtures with synthetic credentials, including Sheets
+read and write requests, and verifies zero redirected receiver requests.
+
 `node --test tests/gdrive-sheets.test.js tests/google-expenses-fixture.test.js tests/google-mcp-host.test.js`
 uses synthetic auth and a stateful offline Google API. It exercises lost request
 and response, module reload, concurrent duplicate/conflict, source protection,
