@@ -17,6 +17,7 @@ const {
 const {
   extractXlsxHyperlinks, parseXlsxToText,
 } = require('../../gdrive/xlsx');
+const { createHash } = require('crypto');
 
 const USER_ID = process.env.USER_ID || process.env.AGENT_USER_ID || '';
 const parseSaJson = (userId) => readServiceAccount(userId || USER_ID);
@@ -44,8 +45,147 @@ async function sheetsApi(method, apiPath, body = null, sa = null) {
     signal: AbortSignal.timeout(15000),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(`Sheets ${res.status}: ${data.error?.message || JSON.stringify(data)}`);
+  if (!res.ok) throw Object.assign(new Error(`Sheets ${res.status}: ${data.error?.message || JSON.stringify(data)}`), { code: 'SHEETS_API_ERROR', status: res.status });
   return data;
+}
+
+const SHEET_OPERATION_KEY = 'trained_assist_sheet_operation_v1';
+const MAX_SHEET_CELLS = 50_000;
+const digest = (value) => createHash('sha256').update(value).digest('hex');
+const quotedSheet = (name) => `'${name.replace(/'/g, "''")}'`;
+
+function sheetError(code, message) {
+  return Object.assign(new Error(`${code}: ${message}`), { code });
+}
+
+function validateSheetTarget(spreadsheetId, sheetName) {
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(spreadsheetId || '') ||
+      typeof sheetName !== 'string' || !sheetName.trim() || sheetName.length > 100 || /[\[\]:*?/\\]/.test(sheetName)) {
+    throw sheetError('SHEETS_INVALID_INPUT', 'Expected spreadsheet_id and a valid sheet_name');
+  }
+}
+
+function columnNumber(column) {
+  return [...column].reduce((total, character) => total * 26 + character.charCodeAt(0) - 64, 0);
+}
+
+function columnName(number) {
+  let name = '';
+  while (number > 0) {
+    number -= 1;
+    name = String.fromCharCode(65 + number % 26) + name;
+    number = Math.floor(number / 26);
+  }
+  return name;
+}
+
+function validateSheetRange(range) {
+  const match = typeof range === 'string' && range.match(/^([A-Z]{1,3})([1-9]\d{0,6})(?::([A-Z]{1,3})([1-9]\d{0,6}))?$/);
+  if (!match) throw sheetError('SHEETS_INVALID_INPUT', 'range must be a bounded A1 cell or rectangle without a tab prefix');
+  const columns = columnNumber(match[3] || match[1]) - columnNumber(match[1]) + 1;
+  const rows = Number(match[4] || match[2]) - Number(match[2]) + 1;
+  if (columns < 1 || rows < 1 || rows * columns > MAX_SHEET_CELLS) {
+    throw sheetError('SHEETS_INVALID_INPUT', `range must contain 1..${MAX_SHEET_CELLS} cells`);
+  }
+}
+
+async function readSheetValues(spreadsheetId, sheetName, range, sa) {
+  const qualified = `${quotedSheet(sheetName)}!${range}`;
+  return sheetsApi('GET', `/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(qualified)}?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER`, null, sa);
+}
+
+function literalRows(rows) {
+  if (!Array.isArray(rows) || !rows.length || rows.length > MAX_SHEET_CELLS || !rows.every(Array.isArray)) {
+    throw sheetError('SHEETS_INVALID_INPUT', 'rows must be a nonempty array of arrays');
+  }
+  const width = Math.max(...rows.map(row => row.length));
+  if (!width || width > 18278 || width * rows.length > MAX_SHEET_CELLS) {
+    throw sheetError('SHEETS_INVALID_INPUT', `rows must contain 1..${MAX_SHEET_CELLS} cells`);
+  }
+  return rows.map(row => Array.from({ length: width }, (_, index) => {
+    const value = row[index] ?? '';
+    if (!['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))) {
+      throw sheetError('SHEETS_INVALID_INPUT', 'cells must be strings, finite numbers, booleans or null');
+    }
+    return value;
+  }));
+}
+
+async function writeSheetOperation({ spreadsheet_id, sheet_name, rows, operationId }, sa) {
+  validateSheetTarget(spreadsheet_id, sheet_name);
+  if (typeof operationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(operationId)) {
+    throw sheetError('SHEETS_INVALID_INPUT', 'operationId must be a stable identifier of 1..160 characters');
+  }
+  const values = literalRows(rows);
+  if (Buffer.byteLength(JSON.stringify(values)) > 2_000_000) {
+    throw sheetError('SHEETS_INVALID_INPUT', 'operation rows exceed the 2 MB payload limit');
+  }
+  const operationHash = digest(operationId);
+  const payloadHash = digest(JSON.stringify({ spreadsheet_id, sheet_name, values }));
+  const sheetId = parseInt(operationHash.slice(0, 8), 16) & 0x7fffffff;
+  const range = `A1:${columnName(values[0].length)}${values.length}`;
+  const inspect = () => sheetsApi('GET', `/spreadsheets/${spreadsheet_id}?fields=sheets(properties,developerMetadata),developerMetadata`, null, sa);
+  const result = (deduplicated) => ({
+    written: true, spreadsheet_id, sheet_name, rows_written: rows.length,
+    tab_created: !deduplicated, operationId, deduplicated, verified: true,
+    url: `https://docs.google.com/spreadsheets/d/${spreadsheet_id}`,
+  });
+  const reconcile = async (meta) => {
+    const metadata = [...(meta.developerMetadata || []), ...(meta.sheets || []).flatMap(sheet => sheet.developerMetadata || [])];
+    const receipts = metadata.filter(entry => entry.metadataKey === SHEET_OPERATION_KEY).map(entry => {
+      try { return { ...JSON.parse(entry.metadataValue), sheetId: entry.location?.sheetId }; }
+      catch { return null; }
+    }).filter(receipt => receipt?.operationHash === operationHash);
+    if (!receipts.length) return false;
+    const target = meta.sheets?.find(sheet => sheet.properties?.title === sheet_name);
+    if (receipts.some(receipt => receipt.payloadHash !== payloadHash || receipt.sheetId !== target?.properties?.sheetId)) {
+      throw sheetError('SHEETS_OPERATION_CONFLICT', 'operationId already committed with another payload or target');
+    }
+    const readback = await readSheetValues(spreadsheet_id, sheet_name, range, sa);
+    const actual = values.map((row, rowIndex) => row.map((value, columnIndex) => readback.values?.[rowIndex]?.[columnIndex] ?? ''));
+    if (JSON.stringify(actual) !== JSON.stringify(values)) {
+      throw sheetError('SHEETS_OPERATION_CONFLICT', 'committed result cells have changed; refusing to overwrite');
+    }
+    return true;
+  };
+  const meta = await inspect();
+  if (await reconcile(meta)) return result(true);
+  if (meta.sheets?.some(sheet => sheet.properties?.title === sheet_name || sheet.properties?.sheetId === sheetId)) {
+    throw sheetError('SHEETS_TARGET_EXISTS', 'operationId writes require a new result tab; existing tabs are never cleared');
+  }
+  try {
+    await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}:batchUpdate`, {
+      requests: [
+        { addSheet: { properties: { sheetId, title: sheet_name, gridProperties: { rowCount: values.length, columnCount: values[0].length } } } },
+        { updateCells: {
+          start: { sheetId, rowIndex: 0, columnIndex: 0 },
+          rows: values.map(row => ({ values: row.map(value => ({ userEnteredValue: {
+            [typeof value === 'number' ? 'numberValue' : typeof value === 'boolean' ? 'boolValue' : 'stringValue']: value,
+          } })) })),
+          fields: 'userEnteredValue',
+        } },
+        { createDeveloperMetadata: { developerMetadata: {
+          metadataKey: SHEET_OPERATION_KEY, metadataValue: JSON.stringify({ operationHash, payloadHash }),
+          location: { sheetId }, visibility: 'DOCUMENT',
+        } } },
+      ],
+    }, sa);
+  } catch (writeError) {
+    try {
+      if (await reconcile(await inspect())) return result(true);
+    } catch (error) {
+      if (error.code === 'SHEETS_OPERATION_CONFLICT') throw error;
+    }
+    if (writeError.status >= 400 && writeError.status < 500 && ![408, 429].includes(writeError.status)) throw writeError;
+    throw sheetError('SHEETS_OUTCOME_UNKNOWN', 'no verified receipt after write failure; reconcile with the same operationId and payload');
+  }
+  try {
+    if (!await reconcile(await inspect())) throw sheetError('SHEETS_OUTCOME_UNKNOWN', 'write returned without a receipt');
+  } catch (error) {
+    if (error.code === 'SHEETS_OPERATION_CONFLICT') throw error;
+    throw sheetError('SHEETS_OUTCOME_UNKNOWN', 'write could not be verified; reconcile with the same operationId and payload');
+  }
+  return result(false);
 }
 
 // ── Docs API helper (structural, index-based edits — preserves formatting) ───
@@ -711,10 +851,63 @@ module.exports = {
       },
     },
 
+    gdrive_create_spreadsheet: {
+      description: 'Create a Google Spreadsheet in an explicitly supplied Shared Drive folder writable by the current service account. Service accounts cannot own files in personal My Drive. Creation is not idempotent: do not blindly retry after a timeout.',
+      inputSchema: {
+        type: 'object', required: ['title', 'folder_id'],
+        properties: {
+          title: { type: 'string', minLength: 1, maxLength: 200 },
+          folder_id: { type: 'string', description: 'Isolated test Shared Drive folder ID (not a personal My Drive folder)' },
+        },
+      },
+      handler: async ({ title, folder_id } = {}) => {
+        if (typeof title !== 'string' || !title.trim() || title.length > 200 || !/^[A-Za-z0-9_-]{1,200}$/.test(folder_id || '')) {
+          throw sheetError('SHEETS_INVALID_INPUT', 'Expected title and folder_id');
+        }
+        const sa = requireSa();
+        const folder = await driveApi('GET', `/drive/v3/files/${folder_id}?supportsAllDrives=true&fields=id,mimeType,driveId,capabilities(canAddChildren)`, null, sa);
+        if (folder.mimeType !== 'application/vnd.google-apps.folder' || !folder.driveId || !folder.capabilities?.canAddChildren) {
+          throw sheetError('SHEETS_FOLDER_UNAVAILABLE', 'Expected a writable Shared Drive folder for the isolated service account');
+        }
+        const file = await driveApi('POST', '/drive/v3/files?supportsAllDrives=true&fields=id,name,webViewLink', {
+          name: title, mimeType: 'application/vnd.google-apps.spreadsheet', parents: [folder_id],
+        }, sa);
+        if (!file.id) throw sheetError('SHEETS_OUTCOME_UNKNOWN', 'creation returned without spreadsheet ID; inspect the isolated folder before retrying');
+        return { created: true, spreadsheet_id: file.id, title: file.name || title, url: file.webViewLink || `https://docs.google.com/spreadsheets/d/${file.id}` };
+      },
+    },
+
+    gdrive_read_sheet: {
+      description: 'Read literal/evaluated values from a private Google Spreadsheet tab and bounded A1 range using the current service account. Use this to verify the specific result tab after writing; no public sharing is needed.',
+      inputSchema: {
+        type: 'object', required: ['spreadsheet_id', 'sheet_name'],
+        properties: {
+          spreadsheet_id: { type: 'string' },
+          sheet_name: { type: 'string', description: 'Exact tab title, including spaces or apostrophes' },
+          range: { type: 'string', description: 'Bounded A1 cell or rectangle without tab prefix; maximum 50000 cells. Omit for up to 26 columns and 1000 rows within the tab grid.' },
+        },
+      },
+      handler: async ({ spreadsheet_id, sheet_name, range } = {}) => {
+        validateSheetTarget(spreadsheet_id, sheet_name);
+        const sa = requireSa();
+        if (range === undefined) {
+          const meta = await sheetsApi('GET', `/spreadsheets/${spreadsheet_id}?fields=sheets.properties`, null, sa);
+          const target = meta.sheets?.find(sheet => sheet.properties?.title === sheet_name);
+          if (!target) throw sheetError('SHEETS_TAB_NOT_FOUND', 'Requested tab does not exist');
+          const grid = target.properties.gridProperties || {};
+          range = `A1:${columnName(Math.min(26, grid.columnCount || 26))}${Math.min(1000, grid.rowCount || 1000)}`;
+        }
+        validateSheetRange(range);
+        const data = await readSheetValues(spreadsheet_id, sheet_name, range, sa);
+        return { spreadsheet_id, sheet_name, range: data.range, values: data.values || [], row_count: data.values?.length || 0 };
+      },
+    },
+
     gdrive_write_sheet: {
       description: 'Write rows to a specific tab (sheet) in a Google Spreadsheet. Creates the tab if it does not exist. ' +
         'Use this to save structured data (participants, results, reports) directly into a Google Sheet. ' +
         'rows is an array of arrays — first row should be the header.\n\n' +
+        'Supply operationId for reconcile-safe result writes: a new immutable tab, literal cells and receipt are committed atomically; repeats verify instead of rewriting. Existing tabs are refused in this mode. Set source_sheet_name to guard against selecting the source tab. Without operationId the legacy USER_ENTERED/clear_first defaults are preserved.\n\n' +
         'Example: gdrive_write_sheet({ spreadsheet_id: "1abc...", sheet_name: "Lingerie Show", rows: [["Компания","Сайт","Целевая"],["Рога и копыта","rogaikopyta.ru","Да"]] })',
       inputSchema: {
         type: 'object',
@@ -724,13 +917,19 @@ module.exports = {
           sheet_name:     { type: 'string', description: 'Tab name to write to (created if missing)' },
           rows:           { type: 'array',  description: 'Array of rows; each row is array of cell values. First row = header.' },
           clear_first:    { type: 'boolean', description: 'Clear existing data in the tab before writing (default true)' },
+          operationId:    { type: 'string', description: 'Stable logical write ID; enables immutable new-tab writes with reconciliation and readback' },
+          source_sheet_name: { type: 'string', description: 'Protected source tab; must differ from sheet_name' },
         },
       },
-      handler: async ({ spreadsheet_id, sheet_name, rows, clear_first = true }) => {
+      handler: async ({ spreadsheet_id, sheet_name, rows, clear_first = true, operationId, source_sheet_name }) => {
         if (!spreadsheet_id || !sheet_name || !Array.isArray(rows) || rows.length === 0) {
           return { error: 'Нужны: spreadsheet_id, sheet_name, rows (непустой массив)' };
         }
+        if (source_sheet_name !== undefined && source_sheet_name === sheet_name) {
+          throw sheetError('SHEETS_SOURCE_PROTECTED', 'Result tab must differ from source_sheet_name');
+        }
         const sa = requireSa();
+        if (operationId !== undefined) return writeSheetOperation({ spreadsheet_id, sheet_name, rows, operationId }, sa);
 
         // 1. Get existing sheets to check if tab exists
         const meta = await sheetsApi('GET', `/spreadsheets/${spreadsheet_id}?fields=sheets.properties`, null, sa);
@@ -747,12 +946,12 @@ module.exports = {
         } else {
           sheetId = existing.properties.sheetId;
           if (clear_first) {
-            await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(sheet_name)}:clear`, {}, sa);
+            await sheetsApi('POST', `/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(quotedSheet(sheet_name))}:clear`, {}, sa);
           }
         }
 
         // 3. Write data
-        const range = `${sheet_name}!A1`;
+        const range = `${quotedSheet(sheet_name)}!A1`;
         await sheetsApi('PUT', `/spreadsheets/${spreadsheet_id}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`, {
           values: rows,
         }, sa);
