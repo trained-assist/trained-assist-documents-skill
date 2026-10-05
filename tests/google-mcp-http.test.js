@@ -97,6 +97,37 @@ test('HTTP startup refuses unavailable SA readiness without exposing decryption 
   await assert.rejects(createHttpHost({ runtime }), /^Error: DOMAIN_NOT_READY$/);
 });
 
+test('automatic owner approval is canonical and complete before real domain startup', async context => {
+  const runtime = runtimeFixture(context);
+  const authorization = { profile, userTaskId, ownerApproved: true, spreadsheetId: 'approved-sheet', folderId: 'approved-folder' };
+  fs.writeFileSync(path.join(runtime, 'owner-authorization.json'), JSON.stringify(authorization), { mode: 0o600 });
+  mintBinding({ runtime, runId, userTaskId, expectedActorProfile: profile, credentialProfile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
+  const stdioHost = require('../scripts/sandbox/google-mcp-host.cjs');
+  const originalSpawn = stdioHost.spawnDomain;
+  let spawns = 0;
+  let networkGuardActive = false;
+  let blockedNetworkAttempts = 0;
+  stdioHost.spawnDomain = env => {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runtime, 'owner-target.json'), 'utf8')), { ...authorization, runId });
+    assert.equal(env.GOOGLE_MCP_RUN_ID, runId);
+    spawns++;
+    const child = originalSpawn(env, true);
+    child.on('message', message => {
+      if (message?.networkGuardActive === true) networkGuardActive = true;
+      if (message?.blockedNetworkAttempt === true) blockedNetworkAttempts++;
+    });
+    return child;
+  };
+  let host;
+  try { host = await createHttpHost({ runtime }); } finally { stdioHost.spawnDomain = originalSpawn; }
+  context.after(() => host.close());
+  assert.equal(spawns, 1);
+  assert.equal(host.isReady(), true);
+  assert.equal(networkGuardActive, true);
+  assert.equal(blockedNetworkAttempts, 0);
+  assert.equal(readBinding(runtime).runId, runId);
+});
+
 test('trusted actor registration never changes the hard-pinned credential mount or inherits secrets', context => {
   const runtime = runtimeFixture(context);
   const binding = { profile, credentialProfile, userTaskId, runId, authToken: 'private-transport-token' };

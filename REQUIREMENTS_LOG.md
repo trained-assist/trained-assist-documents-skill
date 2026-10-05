@@ -1,0 +1,6 @@
+# Owner-target provisioning requirements
+
+| ID | Date | Status | Requirement / Decision | Affected artifacts | Validation |
+|---|---|---|---|---|---|
+| MCP-OWNER-1 | 2026-10-05 | active | Parent-owned private authorization pins actor/task and singleton Sheet/folder allowlists; mint derives the actual canonical run, publishes target before binding/start, never creates Google artifacts. No model-supplied scope or credentials. | HTTP mint, owner-target tests, HTTP guide | Syntax/check pass; focused 62 pass, including network-guarded synthetic real-child startup and zero network attempts. No live Google evidence. |
+| MCP-OWNER-2 | 2026-10-05 | active | Conflicts never overwrite; restore only verifies existing target/binding. Template-backed bindings require continuing private authorization. Missing approval remains fail-closed; legacy discovery-only mint is preserved. No shared worktree edits, deploy, root credential reads or live provider requests. | HTTP mint/read, owner-target tests | Conflicts, publication failure, revocation, scope substitution and file safety pass. Full suite: 155 pass, 1 deck-render overflow failure; identical failure reproduced from unmodified 0eb98ce archive. Review/live activation remain separate. |
