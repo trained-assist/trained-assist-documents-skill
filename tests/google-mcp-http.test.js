@@ -10,7 +10,7 @@ const http = require('node:http');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { createHttpHost, mintBinding, readBinding, stdioRpc } = require('../scripts/sandbox/google-mcp-http.cjs');
-const runId = '7a423dc7-e8ec-429f-8460-5427663bc4e3';
+const runId = `run_${crypto.randomUUID()}`;
 const userTaskId = 'ut-test-google';
 const profile = 'sandbox-integrator-google';
 
@@ -64,6 +64,27 @@ test('host-only mint returns metadata, persists a private opaque token and refus
   assert.throws(() => mintBinding({ ...inputs, expiresAt: new Date(Date.now() - 1).toISOString() }), /INVALID_HTTP_BINDING/);
 });
 
+test('mint and private binding accept only canonical run_<UUID> IDs', context => {
+  const runtime = runtimeFixture(context);
+  const inputs = { runtime, runId, userTaskId, profile, expiresAt: new Date(Date.now() + 3600000).toISOString() };
+  const invalidIds = [runId.slice(4), `RUN_${runId.slice(4)}`, `job_${runId.slice(4)}`,
+    `run_${runId}`, 'run_not-a-uuid', runId.slice(0, -1)];
+  const file = path.join(runtime, 'http-binding.json');
+  for (const invalidId of invalidIds) {
+    assert.throws(() => mintBinding({ ...inputs, runId: invalidId }), /INVALID_HTTP_BINDING/);
+    assert.equal(fs.existsSync(file), false);
+  }
+  mintBinding(inputs);
+  const binding = readBinding(runtime);
+  assert.equal(binding.runId, runId);
+  for (const invalidId of invalidIds) {
+    fs.writeFileSync(file, JSON.stringify({ ...binding, runId: invalidId }));
+    assert.throws(() => readBinding(runtime), /INVALID_HTTP_BINDING/);
+  }
+  fs.writeFileSync(file, JSON.stringify(binding));
+  assert.equal(readBinding(runtime).runId, runId);
+});
+
 test('HTTP startup refuses unavailable SA readiness without exposing decryption errors', async context => {
   const runtime = runtimeFixture(context);
   mintBinding({ runtime, runId, userTaskId, profile, expiresAt: new Date(Date.now() + 3600000).toISOString() });
@@ -87,7 +108,7 @@ test('auth and canonical task/profile/run scope refuse before any domain calls',
   const { post } = await hostFixture(context);
   const request = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
   assert.equal((await post(request, { Authorization: 'Bearer untrusted' })).status, 401);
-  for (const mismatch of [{ 'X-MCP-Run-Id': 'cp-spec-run-not-canonical' },
+  for (const mismatch of [{ 'X-MCP-Run-Id': `run_${crypto.randomUUID()}` }, { 'X-MCP-Run-Id': runId.slice(4) },
     { 'X-MCP-Profile': 'real-user' }, { 'X-MCP-User-Task-Id': 'another-task' }]) {
     assert.equal((await post(request, mismatch)).status, 403);
   }
@@ -109,7 +130,7 @@ test('owner approval is also canonical-run and task bound before artifact networ
   const request = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
     name: 'gdrive_read_sheet', arguments: { spreadsheet_id: 'different-sheet', sheet_name: 'Expenses' },
   } };
-  const target = { profile, userTaskId, runId: 'wrong-cp-run', ownerApproved: true, spreadsheetId: 'approved-sheet' };
+  const target = { profile, userTaskId, runId: `run_${crypto.randomUUID()}`, ownerApproved: true, spreadsheetId: 'approved-sheet' };
   const file = path.join(runtime, 'owner-target.json');
   fs.writeFileSync(file, JSON.stringify(target), { mode: 0o600 });
   assert.equal((await post(request)).body.error.message, 'OWNER_TARGET_REQUIRED');

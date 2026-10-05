@@ -14,8 +14,11 @@ sent to the engine. Live artifact access requires separate owner target approval
 
 The trusted resolver maps its binding reference to the already-provisioned
 isolated runtime on the documents host. After Runner normalization, register
-`userTaskId`, the dedicated profile and the **canonical Runner run UUID**, not
+`userTaskId`, the dedicated profile and the **canonical Runner ID `run_<UUID>`**, not
 CP's original `spec.runId`. Registration must precede engine/model access.
+Keep the exact `run_` prefix in mint inputs, private bindings, scope headers and
+owner approval. Bare UUIDs and other prefixes are rejected; no normalization or
+scope relaxation is performed by this host.
 
 Call the exported `mintBinding({runtime, userTaskId, profile, runId, expiresAt})`
 from `scripts/sandbox/google-mcp-http.cjs`, or use its operator CLI:
@@ -24,7 +27,7 @@ from `scripts/sandbox/google-mcp-http.cjs`, or use its operator CLI:
 node scripts/sandbox/google-mcp-http-mint.cjs \
   --runtime /absolute/private/google-runtime \
   --user-task-id REGISTERED_TASK_ID --profile sandbox-integrator-google \
-  --run-id CANONICAL_RUNNER_UUID --expires-at FUTURE_ISO_TIMESTAMP
+  --run-id CANONICAL_RUNNER_ID --expires-at FUTURE_ISO_TIMESTAMP
 ```
 
 Minting writes a fresh random 256-bit opaque token to `http-binding.json` in
@@ -59,7 +62,7 @@ supports named servers, header env references and separate `mcpSecrets`:
           "Authorization": "Bearer {env:GOOGLE_DOCUMENTS_MCP_TOKEN}",
           "X-MCP-User-Task-Id": "REGISTERED_TASK_ID",
           "X-MCP-Profile": "sandbox-integrator-google",
-          "X-MCP-Run-Id": "CANONICAL_RUNNER_UUID"
+          "X-MCP-Run-Id": "CANONICAL_RUNNER_ID"
         }
       }
     }
@@ -107,13 +110,13 @@ Startup verifies the existing SA readiness through exact three-tool discovery
 before opening the HTTP listener; decryption/startup failures stay sanitized.
 
 In HTTP mode, private `owner-target.json` must additionally match both registered
-task ID and canonical run UUID:
+task ID and canonical `run_<UUID>` ID:
 
 ```json
 {
   "profile": "sandbox-integrator-google",
   "userTaskId": "REGISTERED_TASK_ID",
-  "runId": "CANONICAL_RUNNER_UUID",
+  "runId": "CANONICAL_RUNNER_ID",
   "ownerApproved": true,
   "folderId": "OWNER_APPROVED_SHARED_DRIVE_FOLDER_ID",
   "spreadsheetId": "OWNER_APPROVED_TEST_SPREADSHEET_ID"

@@ -8,7 +8,7 @@ const { privatePath, childEnvironment, spawnDomain } = require('./google-mcp-hos
 const versions = new Set(['2025-03-26', '2025-06-18', '2025-11-25']);
 const tools = new Set(['gdrive_create_spreadsheet', 'gdrive_read_sheet', 'gdrive_write_sheet']);
 const identifier = /^[A-Za-z0-9_-]{1,128}$/;
-const runUuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const runUuid = /^run_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const safeErrors = new Set(['OWNER_TARGET_REQUIRED', 'TARGET_NOT_APPROVED', 'GOOGLE_TOOL_FAILED',
   'SHEETS_API_ERROR', 'SHEETS_FOLDER_UNAVAILABLE', 'SHEETS_INVALID_INPUT', 'SHEETS_OPERATION_CONFLICT',
   'SHEETS_OUTCOME_UNKNOWN', 'SHEETS_SOURCE_PROTECTED', 'SHEETS_TAB_NOT_FOUND', 'SHEETS_TARGET_EXISTS']);
