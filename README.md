@@ -18,6 +18,7 @@ evolves here without weighing on the control plane.
 | `src/gdrive/google-auth.js` | Per-profile Google Service Account: key file, JWT → access token, SA delete. |
 | `src/gdrive/drive-watcher.js` | Polls the Drive Changes API per profile, catalogs newly shared files, notifies Telegram. Runs in **core's** process (`server.js` loads it via `siblingLib('documents', …)`). |
 | `src/mcp-skills/tools/10-deck.js` | `deck_markup_guide`, `deck_check`, `deck_render` |
+| `src/mcp-skills/tools/10-docx-reader.js` | `docx_read` — read DOCX files (text, tables, metadata) |
 | `src/mcp-skills/tools/20-doc-export.js` | `doc_export` |
 | `src/mcp-skills/tools/50-gdrive.js` | `gdrive_*` (setup, status, list/read/search/create/update, Docs structure + precise insert, Sheets write, public files) |
 | `src/prompt-domains/*.md` | Prompt sections core adds when this server is mounted |

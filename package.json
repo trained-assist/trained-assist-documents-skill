@@ -16,6 +16,7 @@
     "node": ">=20"
   },
   "dependencies": {
+    "mammoth": "^1.8.0",
     "playwright-core": "1.62.1",
     "pptxgenjs": "4.0.1"
   },
